@@ -170,6 +170,25 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class PathTests(unittest.TestCase):
+    def test_candidate_paths_reads_utf16_and_utf8_and_skips_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            installs = {}
+            for name, enc in (("A", "utf-16"), ("B", "utf-8"), ("C", "utf-8")):
+                home = os.path.join(tmp, "installs", name)
+                os.makedirs(home)
+                if name != "C":                                   # C points at a folder with no terminal64.exe
+                    open(os.path.join(home, "terminal64.exe"), "w").close()
+                data = os.path.join(tmp, "MetaQuotes", "Terminal", name)
+                os.makedirs(data)
+                with open(os.path.join(data, "origin.txt"), "w", encoding=enc) as f:
+                    f.write(home)
+                installs[name] = home
+            found = m.candidate_paths(tmp)
+        self.assertEqual(sorted(os.path.basename(os.path.dirname(p)) for p in found), ["A", "B"])
+        self.assertTrue(all(p.endswith("terminal64.exe") for p in found))
+
+
 class BacktestTests(unittest.TestCase):
     def test_uptrend_after_cross_hits_target_and_costs_are_charged(self):
         import mt5_backtest as bt

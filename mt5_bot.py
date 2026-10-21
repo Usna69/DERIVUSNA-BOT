@@ -38,6 +38,24 @@ def tf_const(name):
     return getattr(mt5, f"TIMEFRAME_{name}")
 
 
+def candidate_paths(appdata=None):
+    """terminal64.exe of every MT5 install, read from <APPDATA>\\MetaQuotes\\Terminal\\*\\origin.txt."""
+    import glob
+    root = os.path.join(appdata or os.getenv("APPDATA", ""), "MetaQuotes", "Terminal")
+    out = []
+    for f in glob.glob(os.path.join(root, "*", "origin.txt")):
+        raw = open(f, "rb").read()
+        text = raw.decode("utf-16" if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else "utf-8", errors="ignore").strip()
+        exe = os.path.join(text, "terminal64.exe")
+        if text and os.path.exists(exe) and exe not in out:
+            out.append(exe)
+    return out
+
+
+def _init(path=None):
+    return mt5.initialize(path=path, timeout=60000) if path else mt5.initialize(timeout=60000)
+
+
 def connect():
     global mt5
     if mt5 is None:
@@ -46,15 +64,23 @@ def connect():
         except ImportError:
             raise SystemExit("MetaTrader5 package missing (Windows only): pip install MetaTrader5")
         mt5 = m
-    path = os.getenv("MT5_PATH")                     # full path to terminal64.exe if you have several MT5 installs
-    ok = mt5.initialize(path=path, timeout=60000) if path else mt5.initialize(timeout=60000)
+    explicit = os.getenv("MT5_PATH")
+    ok = _init(explicit)
+    if not ok and not explicit:                      # several installs: try each, keep the one logged in to Deriv
+        for path in candidate_paths():
+            mt5.shutdown()
+            if _init(path) and "deriv" in str(getattr(mt5.account_info(), "server", "")).lower():
+                print(f"using MT5 at {path}")
+                ok = True
+                break
     if not ok:
         raise SystemExit(
             f"Could not connect to the MT5 desktop app: {mt5.last_error()}.\n"
-            "  1. Open MT5 and log in, then wait until it shows prices.\n"
+            "  1. Open MT5, log in to your Deriv account, and wait until it shows prices.\n"
             "  2. Run MT5 and this CMD window at the same privilege level (both normal, or both 'Run as administrator').\n"
             "  3. 64-bit Python needs 64-bit MT5 (terminal64.exe).\n"
-            "  4. Several MT5 installs? Set MT5_PATH=C:\\Path\\To\\terminal64.exe")
+            "  4. Still failing? Print your install paths with:  type %APPDATA%\\MetaQuotes\\Terminal\\*\\origin.txt\n"
+            "     then set MT5_PATH=<that folder>\\terminal64.exe  (real text, no < > brackets)")
     acc = mt5.account_info()
     if acc is None:
         raise SystemExit("MT5 is running but not logged in to an account.")
