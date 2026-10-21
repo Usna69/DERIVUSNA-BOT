@@ -19,6 +19,14 @@ BOT_MODE=demo python deriv_bot.py
 
 Settings (env): SYMBOL, STAKE, DURATION_TICKS, MAX_TRADES, MAX_DAILY_LOSS. Trades log to trades.csv.
 
+## Windows (CMD)
+```
+setup.bat            :: once
+run.bat backtest
+run.bat paper
+run.bat demo        :: asks for app id + token
+```
+
 ## Backtest
 ```
 python backtest.py                      # last 24h of ticks (the feed's history limit)
