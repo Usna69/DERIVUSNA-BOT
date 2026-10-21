@@ -22,6 +22,7 @@ This is an experiment, not a money machine: most short-term traders lose.
 import asyncio, csv, json, os, time, urllib.error, urllib.request
 from collections import deque
 import websockets
+import db
 
 MODE = os.getenv("BOT_MODE", "paper")
 APP_ID = os.getenv("DERIV_APP_ID", "")
@@ -60,8 +61,18 @@ def send_telegram(text):
         print("telegram failed:", e.__class__.__name__)
 
 
+def bg(fn, *args):
+    """Run a blocking helper (Telegram, Postgres) off the event loop; best effort."""
+    try:
+        asyncio.get_running_loop().create_task(asyncio.to_thread(fn, *args))
+    except RuntimeError:                             # no running loop
+        fn(*args)
+
+
 def alert(text):
     print(f"[alert] {text}")
+    if db.enabled():
+        bg(db.event, MODE, "error" if any(w in text for w in ("error", "lost", "STOP", "limit")) else "info", text)
     try:
         asyncio.get_running_loop().create_task(asyncio.to_thread(send_telegram, f"{MODE}: {text}"))
     except RuntimeError:                             # no running loop
@@ -127,6 +138,7 @@ class Bot:
         self.day = time.strftime("%Y-%m-%d")
         self.limit_alerted = False
         self.stop_alerted = False
+        self.last_hb = 0.0
         self.resumed = False                        # True after a reconnect, to skip the start alert
 
     async def call(self, payload):
@@ -150,7 +162,7 @@ class Bot:
             if m.get("msg_type") == "tick":
                 await self.on_tick(float(m["tick"]["quote"]))
 
-    def log(self, row):
+    def log(self, row, cid=None):
         """Append to trades.csv. Never raises: a locked file (e.g. open in Excel) must not break a live trade."""
         try:
             if os.path.exists(LOG):                  # old column layout: keep it, start a fresh log
@@ -166,6 +178,9 @@ class Bot:
                 w.writerow(row)
         except OSError as e:
             print(f"could not write {LOG} ({e}); close it in Excel. Row: {row}")
+        if db.enabled():
+            _t, mode, symbol, direction, stake, profit, day_pnl, ask, ratio = row
+            bg(db.insert_trade, mode, symbol, direction, stake, profit, day_pnl, ask, ratio, cid)
 
     def allowed(self):
         today = time.strftime("%Y-%m-%d")
@@ -185,8 +200,17 @@ class Bot:
             return False
         return time.time() - self.last_trade >= COOLDOWN_S
 
+    def heartbeat(self):
+        """Tell the dashboard we are alive (every 30s)."""
+        if not db.enabled() or time.time() - self.last_hb < 30:
+            return
+        self.last_hb = time.time()
+        status = "stopped" if os.path.exists(STOP_FILE) else "limit" if self.limit_alerted else "running"
+        bg(db.heartbeat, MODE, SYMBOL, round(self.pnl, 2), self.trades, status)
+
     async def on_tick(self, price):
         self.ticks.append(price)
+        self.heartbeat()
         if self.open_paper:                          # settle a paper trade
             d, entry, left = self.open_paper
             left -= 1
@@ -247,7 +271,7 @@ class Bot:
                 direction, ask, ratio = info
                 profit = float(c["profit"])
                 self.pnl += profit
-                self.log([time.strftime("%H:%M:%S"), MODE, SYMBOL, direction, STAKE, profit, round(self.pnl, 2), ask, ratio])
+                self.log([time.strftime("%H:%M:%S"), MODE, SYMBOL, direction, STAKE, profit, round(self.pnl, 2), ask, ratio], cid)
                 save_state(self)
                 alert(f"{direction} {'WIN' if profit > 0 else 'LOSS'} {profit:+.2f}, day {self.pnl:+.2f}")
                 return

@@ -62,3 +62,20 @@ lost on the second half (46% vs 52% needed). That is overfitting, not an edge. J
 - Create a file named `STOP` in the folder to halt new trades; delete it to resume.
 - No message for `STALE_S` (30) seconds = dead feed, the bot reconnects. Disconnect alerts include Deriv's close code.
 - A locked `trades.csv` (open in Excel) no longer breaks a trade; the row is printed instead.
+
+## Dashboard (Postgres + Next.js on Vercel)
+```
+bot (your PC) --writes--> Postgres (Neon/Supabase) <--reads-- dashboard/ (Vercel)
+```
+The bot logs trades, events and a 30s heartbeat to Postgres when `DATABASE_URL` is set (unset = no change in behaviour,
+and a database outage never stops the bot; `trades.csv` stays the primary log).
+
+1. Create a free Postgres at neon.tech (or Supabase). Copy the connection string. Treat it like a password.
+2. Bot: `pip install -r requirements.txt`, then in CMD `set DATABASE_URL=...` before `run.bat demo`. Tables are created automatically.
+3. Dashboard: import the repo in Vercel, set **Root Directory = `dashboard`**, add env vars `DATABASE_URL` (same string)
+   and `DASHBOARD_PASSWORD`. The site asks for a login (any username) and refuses to load without a password.
+4. Local try-out: `cd dashboard && npm install && npm run dev` with a `.env.local` copied from `.env.example`.
+
+Shows live status (running / limit / stopped / offline), today and all-time P&L, win rate with 95% CI, break-even,
+p(edge) and a plain-English verdict, equity curve, recent trades and events. Tabs switch paper / demo / real.
+`cd dashboard && npm test` checks the stats against the same formulas as `backtest.py`.
