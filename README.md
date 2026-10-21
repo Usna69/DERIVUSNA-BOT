@@ -18,3 +18,47 @@ BOT_MODE=demo python deriv_bot.py
 `real` needs `BOT_MODE=real ALLOW_REAL=1`. Test on paper, then demo for weeks, before real.
 
 Settings (env): SYMBOL, STAKE, DURATION_TICKS, MAX_TRADES, MAX_DAILY_LOSS. Trades log to trades.csv.
+
+## Windows (CMD)
+```
+setup.bat            :: once
+run.bat backtest
+run.bat paper
+run.bat demo        :: asks for app id + token
+```
+
+## Backtest
+```
+python backtest.py                      # last 24h of ticks (the feed's history limit)
+PAYOUT=0.95 python backtest.py
+```
+Replays the same SMA signal and limits on past ticks. Break-even win rate is 1/(1+payout), about 51.3% at 95%.
+
+## Telegram alerts (optional)
+Create a bot with @BotFather, message it once, then get your chat id from `https://api.telegram.org/bot<TOKEN>/getUpdates`.
+```
+set TELEGRAM_TOKEN=...     :: keep secret, never commit
+set TELEGRAM_CHAT_ID=...
+```
+You get alerts for start, each trade result, errors, disconnects and "daily limit hit". No token set = no alerts.
+
+## Measuring
+`trades.csv` now records `ask_price` and `payout_ratio` per trade. `backtest.py` uses the mean real payout from
+demo/real rows when it exists (else `PAYOUT` env, else 95%). An old-layout `trades.csv` is kept as `trades_old_<time>.csv`.
+`FAST`, `SLOW` and `COOLDOWN_S` are now env settings.
+
+## Research tools
+```
+run.bat collect     :: leave running; saves every tick to ticks_R_100.csv (feed only keeps ~24h)
+run.bat backtest    :: win-rate CI + p-value vs break-even, randomness check
+run.bat sweep       :: walk-forward: tune on first half, judge on second half
+run.bat test        :: offline unit tests
+```
+On 24h of R_100: tick changes show no autocorrelation (random), and the best SMA setting on the first half
+lost on the second half (46% vs 52% needed). That is overfitting, not an edge. Judge only on out-of-sample data.
+
+## Safety
+- `state_<mode>.json` keeps the day's P&L, trade count and open contracts across crashes/restarts.
+- Create a file named `STOP` in the folder to halt new trades; delete it to resume.
+- No message for `STALE_S` (30) seconds = dead feed, the bot reconnects. Disconnect alerts include Deriv's close code.
+- A locked `trades.csv` (open in Excel) no longer breaks a trade; the row is printed instead.

@@ -3,3 +3,8 @@ __pycache__/
 trades.csv
 .env
 *.log
+trades_old_*.csv
+state_*.json
+state_*.json.tmp
+ticks_*.csv
+STOP
