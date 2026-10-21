@@ -159,3 +159,8 @@ run.bat lab batch --symbols frxEURJPY,frxGBPJPY --tfs 900,3600 --publish
 ```
 Spreads default per symbol (`SPREADS` in `lab.py`: measured for USDJPY/EURUSD/GBPUSD, an estimate of 0.012% for other pairs);
 override with `--spread-pct`. A symbol that fails to download is skipped and the batch carries on. Batches skip the slow random baseline.
+
+### Scale-out test (`--tp1`)
+`run.bat lab compare --tp1 1.0 --rr 3.0` closes half at 1R, moves the stop of the rest to the entry, and runs the rest to 3R (`--rr` is the
+final target). Over 45 results (USDJPY/EURUSD/GBPUSD x 5m/15m/1h x 5 strategies) it changed average expectancy by -0.001R: it raises the win
+rate (39% to 49%) without changing the average result. It needs a position that can be split (0.02 lots or more).

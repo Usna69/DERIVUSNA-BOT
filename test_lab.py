@@ -101,6 +101,33 @@ class SimulateTests(unittest.TestCase):
         b = sum(r for _, r in lab.simulate(s, sig, 1.5, 1.5, 0.0, stop_fill="extreme"))
         self.assertLessEqual(b, a + 1e-9)
 
+    def test_scale_out_banks_half_then_runner_stopped_at_entry(self):
+        # ATR 1.0 -> dist 1.5. TP1 at 1R = entry+1.5 hit on the entry bar; runner then falls back to the entry.
+        rows = [(1_700_000_000 + i * 300, 100.0, 100.5, 99.5, 100.0) for i in range(40)]
+        rows[31] = (rows[31][0], 100.0, 101.8, 99.9, 101.5)             # reaches +1.5 (TP1), not the stop (98.5)
+        rows[32] = (rows[32][0], 101.5, 101.6, 99.0, 100.0)             # falls back through the entry (100.0)
+        s = lab.Series(rows, 300)
+        (t, r), = lab.simulate(s, self.sig_at(s, 30), sl_atr=1.5, rr=3.0, spread_pct=0.0, tp1=1.0, tp1_frac=0.5)
+        self.assertAlmostEqual(r, 0.5)                                   # 0.5 * 1R banked, runner flat
+
+    def test_scale_out_runner_reaches_the_final_target(self):
+        rows = [(1_700_000_000 + i * 300, 100.0, 100.5, 99.5, 100.0) for i in range(40)]
+        rows[31] = (rows[31][0], 100.0, 101.8, 99.9, 101.5)             # TP1 (+1.5)
+        rows[32] = (rows[32][0], 101.5, 105.5, 101.0, 105.0)            # runner target 3R = +4.5 -> hit
+        s = lab.Series(rows, 300)
+        (t, r), = lab.simulate(s, self.sig_at(s, 30), 1.5, 3.0, 0.0, tp1=1.0, tp1_frac=0.5)
+        self.assertAlmostEqual(r, 0.5 * 1.0 + 0.5 * 3.0)                 # 2.0R
+
+    def test_scale_out_stop_before_tp1_is_a_full_loss(self):
+        s = self.series_with_trade((100.0, 100.2, 97.0, 98.0))
+        (t, r), = lab.simulate(s, self.sig_at(s, 30), 1.5, 3.0, 0.0, tp1=1.0)
+        self.assertAlmostEqual(r, -1.0)
+
+    def test_scale_out_rejects_a_first_target_beyond_the_final_one(self):
+        s = self.series_with_trade((100.0, 103.0, 99.9, 102.0))
+        with self.assertRaises(ValueError):
+            lab.simulate(s, self.sig_at(s, 30), 1.5, 1.5, 0.0, tp1=2.0)
+
     def test_sell_mirrors_buy(self):
         s = self.series_with_trade((100.0, 100.1, 97.0, 98.0))
         (t, r), = lab.simulate(s, self.sig_at(s, 30, -1), 1.5, 1.5, 0.0)

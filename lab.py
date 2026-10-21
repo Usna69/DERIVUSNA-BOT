@@ -168,10 +168,14 @@ def trend_filter(sig, s, n):
 
 
 # ---------------------------------------------------------------- engine
-def simulate(s, sig, sl_atr=1.5, rr=1.5, spread_pct=SPREAD_PCT, atr_n=14, max_hold=MAX_HOLD, stop_fill="level"):
+def simulate(s, sig, sl_atr=1.5, rr=1.5, spread_pct=SPREAD_PCT, atr_n=14, max_hold=MAX_HOLD, stop_fill="level", tp1=None, tp1_frac=0.5):
     """Returns [(epoch, R)] for trades taken one at a time. No lookahead: decide on bar i, enter at open of i+1.
     stop_fill="level" books a stop-out at exactly -1R. stop_fill="extreme" books it at the candle's worst price (a spike
-    jumps through the stop), which can be much worse than -1R. Use it on jumpy markets such as Boom/Crash."""
+    jumps through the stop), which can be much worse than -1R. Use it on jumpy markets such as Boom/Crash.
+    tp1=R scales out: tp1_frac of the position closes at tp1 R, the stop of the rest moves to the entry, and the rest runs to
+    the final target rr. (Needs a position that can be split, e.g. 0.02 lots or more.) Same-bar ambiguities count against you."""
+    if tp1 is not None and not 0 < tp1 < rr:
+        raise ValueError("tp1 must be between 0 and the final target rr")
     atr, out, i = s.atr(atr_n), [], atr_n + 1
     while i < s.n - 2:
         if sig[i] == 0 or atr[i] is None or s.t[i + 1] - s.t[i] > 3 * s.gran:     # skip weekend-gap entries
@@ -181,24 +185,47 @@ def simulate(s, sig, sl_atr=1.5, rr=1.5, spread_pct=SPREAD_PCT, atr_n=14, max_ho
         entry, dist = s.o[i + 1], atr[i] * sl_atr
         sl, tp = (entry - dist, entry + dist * rr) if buy else (entry + dist, entry - dist * rr)
         cost = spread_pct / 100 * entry / dist
-        r, j = None, i + 1
+        r, j, stage, locked = None, i + 1, 0, 0.0
         while j < min(s.n, i + 1 + max_hold):
-            hit_sl = s.l[j] <= sl if buy else s.h[j] >= sl
-            hit_tp = s.h[j] >= tp if buy else s.l[j] <= tp
-            if hit_sl:
-                if stop_fill == "extreme":                # fill at the bar's worst price, not at the stop level
-                    worst = s.l[j] if buy else s.h[j]
-                    r = -max(1.0, abs(entry - worst) / dist)
-                else:
-                    r = -1.0                              # stop first when both are inside one bar (conservative)
-            elif hit_tp:
-                r = rr
+            if tp1 is None:
+                hit_sl = s.l[j] <= sl if buy else s.h[j] >= sl
+                hit_tp = s.h[j] >= tp if buy else s.l[j] <= tp
+                if hit_sl:
+                    if stop_fill == "extreme":                # fill at the bar's worst price, not at the stop level
+                        worst = s.l[j] if buy else s.h[j]
+                        r = -max(1.0, abs(entry - worst) / dist)
+                    else:
+                        r = -1.0                              # stop first when both are inside one bar (conservative)
+                elif hit_tp:
+                    r = rr
+            elif stage == 0:
+                hit_sl = s.l[j] <= sl if buy else s.h[j] >= sl
+                hit_t1 = s.h[j] >= entry + dist * tp1 if buy else s.l[j] <= entry - dist * tp1
+                if hit_sl:
+                    r = -1.0
+                elif hit_t1:
+                    stage, locked = 1, tp1_frac * tp1         # first part banked, stop of the rest moves to the entry
+                    j += 1                                     # the rest is judged from the next bar on (conservative)
+                    continue
+            else:
+                hit_be = s.l[j] <= entry if buy else s.h[j] >= entry
+                hit_t2 = s.h[j] >= tp if buy else s.l[j] <= tp
+                if hit_be:
+                    r = locked                                 # runner stopped at the entry: only the banked part remains
+                elif hit_t2:
+                    r = locked + (1 - tp1_frac) * rr
             if r is not None:
                 break
             j += 1
-        if r is None:                                     # timed out: mark to the last close
+        if r is None:                                         # timed out: mark to the last close
             j = min(j, s.n - 1)
-            r = max(-1.0, min(rr, (s.c[j] - entry) * (1 if buy else -1) / dist))
+            move = (s.c[j] - entry) * (1 if buy else -1) / dist
+            if tp1 is None:
+                r = max(-1.0, min(rr, move))
+            elif stage == 0:
+                r = max(-1.0, min(tp1, move))
+            else:
+                r = locked + (1 - tp1_frac) * max(0.0, min(rr, move))
         out.append((s.t[i], r - cost))
         i = j + 1
     return out
@@ -230,14 +257,14 @@ def verdict(trades, min_trades=300):
     return "FAIL"
 
 
-def random_baseline(s, n_trades, sl_atr, rr, spread_pct, observed, trials=100, seed=7, stop_fill="level"):
+def random_baseline(s, n_trades, sl_atr, rr, spread_pct, observed, trials=100, seed=7, stop_fill="level", tp1=None):
     """Same exits and costs, random entries. Returns the share of random runs at least as good as `observed`."""
     if n_trades < 10:
         return None
     rng, q, better = random.Random(seed), min(0.5, n_trades / max(1, s.n)), 0
     for _ in range(trials):
         sig = [rng.choice((1, -1)) if rng.random() < q else 0 for _ in range(s.n)]
-        t = simulate(s, sig, sl_atr, rr, spread_pct, stop_fill=stop_fill)
+        t = simulate(s, sig, sl_atr, rr, spread_pct, stop_fill=stop_fill, tp1=tp1)
         if t and sum(r for _, r in t) / len(t) >= observed:
             better += 1
     return better / trials
@@ -250,7 +277,7 @@ def evaluate(trades, s=None, args=None):
     ev = {"n": a["n"], "wins": a["wins"], "mean": a["mean"], "lo": a["lo"], "hi": a["hi"], "first": h1["mean"],
           "second": h2["mean"], "verdict": verdict(trades), "random_better": None}
     if a["n"] and s is not None and args is not None and not getattr(args, "fast", False):
-        ev["random_better"] = random_baseline(s, a["n"], args.sl_atr, args.rr, args.spread_pct, a["mean"], stop_fill=args.stop_fill)
+        ev["random_better"] = random_baseline(s, a["n"], args.sl_atr, args.rr, args.spread_pct, a["mean"], stop_fill=args.stop_fill, tp1=getattr(args, "tp1", None))
     return ev
 
 
@@ -313,7 +340,7 @@ def cmd_compare(args):
     rows = []
     for name, (_, params, _) in STRATEGIES.items():
         sig = build_signals(s, name, params, args.session, args.trend)
-        ev = evaluate(simulate(s, sig, args.sl_atr, args.rr, args.spread_pct, stop_fill=args.stop_fill), s, args)
+        ev = evaluate(simulate(s, sig, args.sl_atr, args.rr, args.spread_pct, stop_fill=args.stop_fill, tp1=args.tp1), s, args)
         print(fmt(name, ev))
         rows.append(to_row(name, ev, s, args))
     print("\nPASS = >=300 trades and 95% interval above 0 in BOTH halves. 'random>=' = share of random-entry runs at least this good.")
@@ -356,8 +383,8 @@ def cmd_sweep(args):
         Series([(s.t[i], s.o[i], s.h[i], s.l[i], s.c[i]) for i in range(mid, s.n)], s.gran)
     scored = []
     for p in combos:
-        tr = simulate(train, build_signals(train, args.name, p, args.session, args.trend), args.sl_atr, args.rr, args.spread_pct, stop_fill=args.stop_fill)
-        te = simulate(test, build_signals(test, args.name, p, args.session, args.trend), args.sl_atr, args.rr, args.spread_pct, stop_fill=args.stop_fill)
+        tr = simulate(train, build_signals(train, args.name, p, args.session, args.trend), args.sl_atr, args.rr, args.spread_pct, stop_fill=args.stop_fill, tp1=args.tp1)
+        te = simulate(test, build_signals(test, args.name, p, args.session, args.trend), args.sl_atr, args.rr, args.spread_pct, stop_fill=args.stop_fill, tp1=args.tp1)
         scored.append((p, tr, te))
     ok = [x for x in scored if len(x[1]) >= 30]
     if not ok:
@@ -392,7 +419,8 @@ def main(argv=None):
     p.add_argument("--tf", type=int, default=300, help="candle size in seconds (300=M5, 900=M15, 3600=H1)")
     p.add_argument("--bars", type=int, default=60000)
     p.add_argument("--sl-atr", type=float, default=1.5)
-    p.add_argument("--rr", type=float, default=1.5)
+    p.add_argument("--rr", type=float, default=1.5, help="final target in R (with --tp1 this is the runner target)")
+    p.add_argument("--tp1", type=float, default=None, help="scale out: close half at this many R, move the stop to entry, run the rest to --rr")
     p.add_argument("--spread-pct", type=float, default=None, help="spread as %% of price; default is per symbol (see SPREADS in lab.py)")
     p.add_argument("--symbols", default=None, help="batch: comma list, default " + BATCH_SYMBOLS)
     p.add_argument("--tfs", default=None, help="batch: comma list of candle seconds, default " + BATCH_TFS)
