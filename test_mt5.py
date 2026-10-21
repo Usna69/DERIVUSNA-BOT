@@ -239,6 +239,53 @@ class MultiSymbolTests(MT5Fixture):
         self.assertEqual(m.heartbeat([r], 123.0), 123.0)
 
 
+class StrategySwitchTests(MT5Fixture):
+    """MT5_STRATEGY picks the rule; the lab's own functions produce the signal."""
+
+    def long_series_with_rsi_signal(self):
+        import lab, random
+        rnd, x, c = random.Random(8), 100.0, []
+        for _ in range(700):
+            x += rnd.gauss(0, 1.0)
+            c.append(round(x, 3))
+        s = lab.Series([(i, v, v + 0.5, v - 0.5, v) for i, v in enumerate(c)], 300)
+        sig = lab.rsi_revert(s)
+        i = max(k for k in range(300, len(c)) if sig[k] == 1)
+        return c[:i + 1]
+
+    def test_rsi_revert_signal_comes_from_the_lab_function(self):
+        closes = self.long_series_with_rsi_signal()
+        self.fake = FakeMT5(closes)
+        m.mt5 = self.fake
+        old = m.STRATEGY
+        m.STRATEGY = "rsi_revert"
+        m.RISK_USD = 1000.0
+        self.addCleanup(lambda: (setattr(m, "STRATEGY", old), setattr(m, "RISK_USD", 0.5)))
+        self.assertEqual(m.bars_needed(), 260)
+        v = m.symbol_view("BTCUSD")
+        self.assertEqual(m.strategy_signal(v[3], v[4]), "CALL")
+        r = m.Runner(False, "BTCUSD")
+        self.assertEqual(r.step(self.fake.account_info()), "validated")
+        self.assertEqual(r.counts["signals"], 1)
+        self.assertEqual(self.fake.sent, [])                      # orders are off
+
+    def test_sma_cross_is_the_default_and_needs_few_bars(self):
+        self.assertEqual(m.STRATEGY, "sma_cross")
+        self.assertLess(m.bars_needed(), 100)
+
+    def test_every_lab_strategy_can_run_through_the_bot_path(self):
+        import lab
+        closes = [c for c in self.long_series_with_rsi_signal()]
+        self.fake = FakeMT5(closes)
+        m.mt5 = self.fake
+        old = m.STRATEGY
+        self.addCleanup(setattr, m, "STRATEGY", old)
+        for name in lab.STRATEGIES:
+            m.STRATEGY = name
+            v = m.symbol_view("BTCUSD")
+            self.assertIn(m.strategy_signal(v[3], v[4]), ("CALL", "PUT", None), name)
+
+
 class OrderSwitchTests(unittest.TestCase):
     def test_only_run_with_flag_places_orders(self):
         self.assertTrue(m.orders_enabled("run", {"MT5_ORDERS": "1"}))

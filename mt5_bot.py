@@ -34,6 +34,8 @@ MAX_SPREAD_FRAC = float(os.getenv("MT5_MAX_SPREAD_FRAC", "0.25"))   # spread mus
 ALLOW_SYNTHETIC = os.getenv("MT5_ALLOW_SYNTHETIC") == "1"   # Boom/Crash/Volatility/Step: random by design, no edge possible
 SYMBOLS = [x.strip() for x in os.getenv("MT5_SYMBOLS", "").split(",") if x.strip()]   # several pairs at once, shared loss caps
 STATUS_S = int(os.getenv("MT5_STATUS_S", "900"))     # print a status line this often so a quiet bot is not a mystery
+STRATEGY = os.getenv("MT5_STRATEGY", "sma_cross")    # sma_cross | rsi_revert | bb_revert | donchian | trend_pullback (see lab.py)
+TF_SECONDS = {"M1": 60, "M5": 300, "M15": 900, "M30": 1800, "H1": 3600, "H4": 14400, "D1": 86400}
 MAGIC = 20260101
 POLL_S = 5
 mt5 = None                                           # MetaTrader5 module, set by connect() (tests inject a fake)
@@ -151,16 +153,32 @@ def is_synthetic(si):
     return any(w in text for w in ("derived", "synthetic", "volatility", "boom", "crash", "step ", "jump", "range break", "dex "))
 
 
+def bars_needed():
+    """Closed bars to load: enough for ATR and the chosen rule (trend_pullback needs a 200-bar average)."""
+    return max(max(SLOW, ATR_N) + 5, 0 if STRATEGY == "sma_cross" else 260)
+
+
+def strategy_signal(closes, rows):
+    """'CALL', 'PUT' or None for the last closed bar, using the rule in MT5_STRATEGY (same code the lab tested)."""
+    if STRATEGY == "sma_cross":
+        return d.signal(closes, FAST, SLOW)
+    import lab
+    s = lab.Series(rows, TF_SECONDS.get(TF_NAME, 300))
+    sig = lab.STRATEGIES[STRATEGY][0](s, **lab.STRATEGIES[STRATEGY][1])[-1]
+    return "CALL" if sig == 1 else "PUT" if sig == -1 else None
+
+
 def symbol_view(symbol):
-    """(si, tick, atr, closes) for one symbol, or None if unusable."""
+    """(si, tick, atr, closes, rows) for one symbol, or None if unusable. rows = (time, open, high, low, close)."""
     if not mt5.symbol_select(symbol, True):
         return None
     si, tick = mt5.symbol_info(symbol), mt5.symbol_info_tick(symbol)
-    r = bars(symbol, max(SLOW, ATR_N) + 5)
+    r = bars(symbol, bars_needed())
     if si is None or tick is None or r is None or si.trade_mode != 4:      # 4 = full trading allowed
         return None
     a = atr([x["high"] for x in r], [x["low"] for x in r], [x["close"] for x in r], ATR_N)
-    return (si, tick, a, [float(x["close"]) for x in r]) if a else None
+    rows = [(int(x["time"]), float(x["open"]), float(x["high"]), float(x["low"]), float(x["close"])) for x in r]
+    return (si, tick, a, [float(x["close"]) for x in r], rows) if a else None
 
 
 def scan(print_rows=True):
@@ -172,7 +190,7 @@ def scan(print_rows=True):
         v = symbol_view(s.name)
         if not v:
             continue
-        si, tick, a, _ = v
+        si, tick, a = v[:3]
         mid = (tick.ask + tick.bid) / 2
         dist = max(a * SL_ATR, (si.trade_stops_level + 2) * si.point)
         per_lot = abs(mt5.order_calc_profit(0, s.name, 1.0, tick.ask, tick.ask - dist) or dist * si.trade_contract_size)
@@ -233,7 +251,7 @@ class Runner:
     def status_line(self):
         c = self.counts
         skipped = ", ".join(f"{k} x{v}" for k, v in c["skipped"].items()) or "none"
-        return (f"[status] {self.symbol} {TF_NAME}: bars {c['bars']}, signals {c['signals']}, opened {c['opened']}, "
+        return (f"[status] {self.symbol} {TF_NAME} {STRATEGY}: bars {c['bars']}, signals {c['signals']}, opened {c['opened']}, "
                 f"skipped: {skipped} | day {self.state.pnl:+.2f} USD")
 
     def warn_once(self, key, text):
@@ -296,13 +314,13 @@ class Runner:
         v = symbol_view(self.symbol)
         if not v:
             return "no market data"
-        si, tick, a, closes = v
+        si, tick, a, closes, rows = v
         bar = int(mt5.copy_rates_from_pos(self.symbol, tf_const(TF_NAME), 1, 1)[0]["time"])
         if bar == self.last_bar and not check_only:
             return "waiting for next bar"
         self.last_bar = bar
         self.counts["bars"] += 1
-        direction = d.signal(closes, FAST, SLOW)
+        direction = strategy_signal(closes, rows)
         if not direction and not check_only:
             return "no signal"
         if direction:
@@ -393,6 +411,10 @@ def main(argv):
     if cmd == "scan":
         scan()
         return
+    if STRATEGY != "sma_cross":
+        import lab
+        if STRATEGY not in lab.STRATEGIES:
+            raise SystemExit(f"unknown MT5_STRATEGY {STRATEGY!r}; choose from sma_cross, {', '.join(lab.STRATEGIES)}")
     names = list(SYMBOLS) if SYMBOLS else [SYMBOL]
     if names == ["auto"]:
         ranked = scan(print_rows=False)
@@ -420,7 +442,7 @@ def main(argv):
             print(f"{r.symbol} result:", r.step(acc, check_only=True))
         return
     label = "PLACING REAL ORDERS" if orders and real else "PLACING ORDERS (demo)" if orders else "SIGNALS ONLY, no orders"
-    print(f"{label} on {', '.join(names)} {TF_NAME}, risk {RISK_USD:.2f} USD/trade, daily cap {DAILY_LOSS_USD:.2f} USD, "
+    print(f"{label} on {', '.join(names)} {TF_NAME}, strategy {STRATEGY}, risk {RISK_USD:.2f} USD/trade, daily cap {DAILY_LOSS_USD:.2f} USD, "
           f"max {MAX_TRADES} trades/day (shared). Status line every {STATUS_S // 60} min. Ctrl+C to stop.")
     d.alert(f"mt5 started on {', '.join(names)} ({'REAL' if real else 'DEMO'}, orders {'ON' if orders else 'OFF'})")
     last_status, last_hb = time.time(), 0.0

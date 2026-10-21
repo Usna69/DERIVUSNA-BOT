@@ -124,3 +124,8 @@ On Boom/Crash/Jump indices a spike jumps through stop levels, so a stop-out is o
 (`--stop-fill level`) books exactly -1R and makes those markets look profitable (Boom 1000 donchian: +0.23R, "PASS").
 `run.bat lab compare --symbol BOOM1000 --stop-fill extreme` books stop-outs at the candle's worst price: every strategy then
 fails (-0.18R to -0.36R). Always run jumpy markets in both modes.
+
+## MT5: choose the rule (`MT5_STRATEGY`)
+`set MT5_STRATEGY=rsi_revert` (or `bb_revert`, `donchian`, `trend_pullback`; default `sma_cross`). The bot calls the exact functions
+the lab tested, on the closed bars of `MT5_TF`. Lab results (after spread) say `rsi_revert`/`bb_revert` lose least; none passed the gate.
+Longer candles cost less but need wider stops, so check `run.bat mt5scan` (risk at min lot) before using `MT5_TF=M15` or higher.
