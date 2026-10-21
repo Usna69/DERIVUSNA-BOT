@@ -164,3 +164,14 @@ override with `--spread-pct`. A symbol that fails to download is skipped and the
 `run.bat lab compare --tp1 1.0 --rr 3.0` closes half at 1R, moves the stop of the rest to the entry, and runs the rest to 3R (`--rr` is the
 final target). Over 45 results (USDJPY/EURUSD/GBPUSD x 5m/15m/1h x 5 strategies) it changed average expectancy by -0.001R: it raises the win
 rate (39% to 49%) without changing the average result. It needs a position that can be split (0.02 lots or more).
+
+### Lab on your MT5 history (`--source mt5`) and the five candidates
+```
+run.bat lab compare --source mt5 --symbol frxAUDJPY --tf 3600 --bars 100000
+run.bat lab candidates --bars 100000        :: AUDJPY donchian, GBPUSD bb_revert, AUDCAD rsi_revert, GBPCAD rsi_revert, EURJPY sma_cross (all 1h)
+```
+`--source mt5` reads closed candles from the MT5 desktop app (set `MT5_PATH` as for the bot) and uses the terminal's own median spread.
+Prepare MT5 first: add the pairs in Market Watch (Ctrl+M, right-click, Symbols), set Tools > Options > Charts > Max bars in chart to Unlimited,
+and open each pair's H1 chart and press Home a few times so the terminal downloads its history.
+`candidates` tests only those five fixed combinations, no tuning. 'older (new data)' is history before the last 365 days, which they
+were not picked from; a candidate counts only if its interval there is above zero (`holds on new data: YES`).

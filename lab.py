@@ -319,6 +319,17 @@ def build_signals(s, name, params, session, trend):
 
 
 def load_series(args):
+    if getattr(args, "source", "deriv") == "mt5":
+        import mt5data
+        rows, measured = mt5data.load(args.symbol, args.tf, args.bars)
+        if measured and not getattr(args, "spread_given", False):
+            args.spread_pct = round(measured, 4)            # the terminal's own median spread beats my estimates
+        if args.spread_pct is None:
+            args.spread_pct = default_spread(args.symbol)   # no spread data in the history: fall back to the estimate
+        s = Series(rows, args.tf)
+        print(f"{args.symbol} {args.tf}s (MT5 history): {s.n} candles over {(s.t[-1] - s.t[0]) / 86400 / 365:.1f} years, "
+              f"spread {args.spread_pct}% of price, stop {args.sl_atr}xATR, target {args.rr}R")
+        return s
     import candles
     try:
         rows = asyncio.run(candles.fetch(args.symbol, args.tf, args.bars))
@@ -371,6 +382,49 @@ def cmd_batch(args):
     print(f"\nbatch finished: {done} runs ok, {len(failed)} skipped" + ("".join(f"\n  {x}" for x in failed)))
 
 
+CANDIDATES = [("AUDJPY", "donchian"), ("GBPUSD", "bb_revert"), ("AUDCAD", "rsi_revert"), ("GBPCAD", "rsi_revert"), ("EURJPY", "sma_cross")]
+
+
+def split_by_age(trades, end_epoch, days=365):
+    """(older, recent): trades before / within the last `days` days before end_epoch."""
+    cut = end_epoch - days * 86400
+    return [x for x in trades if x[0] < cut], [x for x in trades if x[0] >= cut]
+
+
+def holds(ev):
+    """YES only if the whole 95% interval is above zero; NO if the average is not positive; otherwise INCONCLUSIVE."""
+    if ev["n"] < 30:
+        return "TOO FEW"
+    if ev["lo"] > 0:
+        return "YES"
+    return "NO" if ev["mean"] <= 0 else "INCONCLUSIVE"
+
+
+def cmd_candidates(args):
+    """Re-test the five combinations picked from the public-feed batch, on MT5 history, fixed rules (no tuning).
+    The picked-from window is the last year; older history is new data they were not chosen on."""
+    import copy
+    args.source = "mt5"
+    print("Pre-chosen candidates, hourly candles, default rule settings. 'older' = history before the last 365 days (new data).\n")
+    for pair, strat in CANDIDATES:
+        a = copy.copy(args)
+        a.symbol, a.tf, a.fast = pair, 3600, True
+        try:
+            s = load_series(a)
+        except Exception as e:                              # noqa: BLE001 - one missing pair must not stop the rest
+            print(f"{pair}: skipped ({e})\n")
+            continue
+        sig = build_signals(s, strat, STRATEGIES[strat][1], None, 0)
+        trades = simulate(s, sig, a.sl_atr, a.rr, a.spread_pct, stop_fill=a.stop_fill, tp1=a.tp1)
+        older, recent = split_by_age(trades, s.t[-1])
+        eo, er, ea = evaluate(older), evaluate(recent), evaluate(trades)
+        print(f"{pair} 1h {strat}")
+        print("  " + fmt("all history", ea))
+        print("  " + fmt("older (new data)", eo) + f"   holds on new data: {holds(eo)}")
+        print("  " + fmt("last year (picked on)", er) + "\n")
+    print("A candidate counts only if 'holds on new data' is YES (interval above zero). INCONCLUSIVE needs more history; NO drops it.")
+
+
 def cmd_sweep(args):
     if args.name not in STRATEGIES:
         raise SystemExit(f"unknown strategy; choose from {', '.join(STRATEGIES)}")
@@ -413,7 +467,7 @@ def parse_session(txt):
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("cmd", choices=["compare", "sweep", "fetch", "batch"])
+    p.add_argument("cmd", choices=["compare", "sweep", "fetch", "batch", "candidates"])
     p.add_argument("name", nargs="?", default="sma_cross", help="strategy for sweep")
     p.add_argument("--symbol", default="frxUSDJPY")
     p.add_argument("--tf", type=int, default=300, help="candle size in seconds (300=M5, 900=M15, 3600=H1)")
@@ -427,13 +481,15 @@ def main(argv=None):
     p.add_argument("--stop-fill", choices=["level", "extreme"], default="level", help="extreme = book stop-outs at the candle's worst price (use on Boom/Crash)")
     p.add_argument("--publish", action="store_true", help="save results to the database (needs DATABASE_URL) for the dashboard's Lab page")
     p.add_argument("--fast", action="store_true", help="skip the random-entry baseline (much quicker)")
+    p.add_argument("--source", choices=["deriv", "mt5"], default="deriv", help="mt5 = read candles from your MT5 terminal (years of history, real spreads)")
     p.add_argument("--session", default=None, help="UTC hours, e.g. 12-17")
     p.add_argument("--trend", type=int, default=0, help="only trade with the n-bar average, e.g. 200")
     args = p.parse_args(argv)
     args.session = parse_session(args.session)
-    if args.spread_pct is None and args.cmd != "batch":
+    args.spread_given = args.spread_pct is not None
+    if args.spread_pct is None and args.cmd not in ("batch", "candidates"):
         args.spread_pct = default_spread(args.symbol)
-    {"compare": cmd_compare, "sweep": cmd_sweep, "fetch": cmd_fetch, "batch": cmd_batch}[args.cmd](args)
+    {"compare": cmd_compare, "sweep": cmd_sweep, "fetch": cmd_fetch, "batch": cmd_batch, "candidates": cmd_candidates}[args.cmd](args)
 
 
 if __name__ == "__main__":

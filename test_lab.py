@@ -230,6 +230,87 @@ class BatchTests(unittest.TestCase):
         self.assertEqual(calls, [0.05])
 
 
+class FakeRates:
+    """MT5 rates as list-of-dicts (what the bot's own fake uses), with a bar limit like a real terminal."""
+    def __init__(self, closes, spread=15, limit=None, t0=1_500_000_000, gran=3600):
+        self.rows = [{"time": t0 + i * gran, "open": c, "high": c + 0.2, "low": c - 0.2, "close": c, "spread": spread} for i, c in enumerate(closes)]
+        self.limit, self.asked, self.names = limit, [], []
+
+    def symbol_select(self, name, on):
+        self.names.append(name)
+        return name != "NOPE"
+
+    def symbol_info(self, name):
+        return type("SI", (), {"point": 0.001})()
+
+    def copy_rates_from_pos(self, name, tf, start, n):
+        self.asked.append(n)
+        if self.limit is not None and n > self.limit:
+            return None
+        return self.rows[-n:]
+
+
+class MT5SourceTests(unittest.TestCase):
+    def setUp(self):
+        import mt5data, mt5_bot
+        self.md, self.bot = mt5data, mt5_bot
+        self.saved = (mt5_bot.mt5, mt5data._connected)
+        mt5data._connected = True                                    # skip the real terminal connection
+        mt5_bot.mt5 = mt5_bot.mt5 or type("M", (), {})()
+        mt5_bot.mt5.TIMEFRAME_H1 = 16385
+        self.fake = FakeRates(walk(3000, seed=2, step=0.5))
+        self.real = {k: getattr(mt5_bot.mt5, k, None) for k in ("symbol_select", "symbol_info", "copy_rates_from_pos")}
+        for k in self.real:
+            setattr(mt5_bot.mt5, k, getattr(self.fake, k))
+
+    def tearDown(self):
+        self.bot.mt5, self.md._connected = self.saved
+
+    def test_name_mapping_rows_and_measured_spread(self):
+        rows, spread = self.md.load("frxAUDJPY", 3600, 2000)
+        self.assertEqual(self.fake.names, ["AUDJPY"])                  # public-feed name mapped to the MT5 name
+        self.assertEqual(len(rows), 2000)
+        self.assertEqual(rows[0][0] + 3600, rows[1][0])
+        expected = 15 * 0.001 / rows[0][4] * 100
+        self.assertLess(abs(spread - expected) / expected, 0.5)         # median of per-bar spread as % of price
+
+    def test_halves_the_request_when_the_terminal_caps_bars(self):
+        self.fake.limit = 1200
+        rows, _ = self.md.load("frxAUDJPY", 3600, 100000)
+        self.assertLessEqual(len(rows), 1200)
+        self.assertGreater(len(self.fake.asked), 1)
+        self.assertEqual(self.fake.asked[0], 100000)
+
+    def test_unavailable_symbol_and_bad_timeframe_give_clear_errors(self):
+        with self.assertRaises(RuntimeError) as cm:
+            self.md.load("NOPE", 3600)
+        self.assertIn("Market Watch", str(cm.exception))
+        with self.assertRaises(RuntimeError):
+            self.md.load("frxAUDJPY", 777)
+
+    def test_split_by_age_and_holds(self):
+        trades = [(100, 1.0), (200, -1.0), (900, 0.5)]
+        older, recent = lab.split_by_age(trades, 1000, days=0.005)     # cut at 1000 - 432 = 568
+        self.assertEqual([x[0] for x in older], [100, 200])
+        self.assertEqual([x[0] for x in recent], [900])
+        self.assertEqual(lab.holds({"n": 400, "mean": 0.1, "lo": 0.02, "hi": 0.2}), "YES")
+        self.assertEqual(lab.holds({"n": 400, "mean": 0.1, "lo": -0.05, "hi": 0.25}), "INCONCLUSIVE")
+        self.assertEqual(lab.holds({"n": 400, "mean": -0.05, "lo": -0.2, "hi": 0.1}), "NO")
+        self.assertEqual(lab.holds({"n": 10, "mean": 0.5, "lo": 0.4, "hi": 0.6}), "TOO FEW")
+
+    def test_candidates_command_runs_all_five_on_mt5_history(self):
+        import io, contextlib
+        self.fake.rows = FakeRates(walk(30000, seed=5, step=0.6)).rows          # about 3.4 years of hourly bars
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            lab.main(["candidates", "--bars", "30000"])
+        text = out.getvalue()
+        for pair, strat in lab.CANDIDATES:
+            self.assertIn(f"{pair} 1h {strat}", text)
+        self.assertEqual(text.count("holds on new data:"), 5)
+        self.assertIn("older (new data)", text)
+
+
 class StallTests(unittest.TestCase):
     def test_trickle_of_one_candle_counts_as_a_stall(self):
         s = 0
