@@ -184,6 +184,16 @@ if __name__ == "__main__":
 
 @unittest.skipUnless(os.getenv("TEST_DATABASE_URL"), "set TEST_DATABASE_URL to a scratch Postgres to run")
 class DbTests(unittest.TestCase):
+    def test_init_creates_tables(self):
+        import db, psycopg
+        db.DB_URL = os.environ["TEST_DATABASE_URL"]
+        with psycopg.connect(db.DB_URL, autocommit=True) as c:
+            for tbl in ("trades", "events", "bot_status"):
+                c.execute(f"drop table if exists {tbl}")
+        db.init()
+        with psycopg.connect(db.DB_URL) as c:
+            self.assertEqual(c.execute("select count(*) from information_schema.tables where table_name in ('trades','events','bot_status')").fetchone()[0], 3)
+
     def test_roundtrip_and_never_raises(self):
         import db, psycopg
         db.DB_URL, db._ready = os.environ["TEST_DATABASE_URL"], False

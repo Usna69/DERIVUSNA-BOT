@@ -74,3 +74,18 @@ def heartbeat(mode, symbol, day_pnl, trades_today, status, message=""):
           " on conflict (mode) do update set symbol=excluded.symbol, day_pnl=excluded.day_pnl,"
           " trades_today=excluded.trades_today, status=excluded.status, message=excluded.message, last_seen=now()",
           (mode, symbol, day_pnl, trades_today, status, message[:200]))
+
+
+def init():
+    """Create the tables now (raises on failure, unlike the bot-side helpers)."""
+    import psycopg
+    if not DB_URL:
+        raise SystemExit("DATABASE_URL is not set in this window.")
+    with psycopg.connect(DB_URL, connect_timeout=15, autocommit=True) as conn:
+        conn.execute(SCHEMA)
+        n = conn.execute("select count(*) from information_schema.tables where table_name in ('trades','events','bot_status')").fetchone()[0]
+    print(f"database connected; {n}/3 tables ready (trades, events, bot_status)")
+
+
+if __name__ == "__main__":
+    init()

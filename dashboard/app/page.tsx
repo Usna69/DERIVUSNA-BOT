@@ -81,6 +81,17 @@ export default async function Home({ searchParams }: { searchParams: Promise<{ m
     const events = await sql<Event[]>`select ts, mode, level, text from events where mode = ${mode} order by ts desc limit 15`;
     data = { statuses, mode, rows, events };
   } catch (e) {
+    const msg = e instanceof Error ? e.message : "Unknown error";
+    if (/relation .* does not exist/.test(msg)) {
+      return (
+        <main className="mx-auto max-w-3xl p-6">
+          <div className="rounded-xl border border-amber-300 bg-amber-50 p-4 text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200">
+            <div className="font-semibold">Connected to the database. Waiting for the first bot.</div>
+            <div className="mt-1 text-sm">The tables don&apos;t exist yet. Start a bot with DATABASE_URL set, or run <code>run.bat dbinit</code> on your PC once. Then refresh.</div>
+          </div>
+        </main>
+      );
+    }
     return (
       <main className="mx-auto max-w-3xl p-6">
         <div className="rounded-xl border border-rose-300 bg-rose-50 p-4 text-rose-900 dark:border-rose-900 dark:bg-rose-950 dark:text-rose-200">
