@@ -46,8 +46,15 @@ def connect():
         except ImportError:
             raise SystemExit("MetaTrader5 package missing (Windows only): pip install MetaTrader5")
         mt5 = m
-    if not mt5.initialize():
-        raise SystemExit(f"Could not connect to the MT5 desktop app: {mt5.last_error()}. Open MT5 and log in first.")
+    path = os.getenv("MT5_PATH")                     # full path to terminal64.exe if you have several MT5 installs
+    ok = mt5.initialize(path=path, timeout=60000) if path else mt5.initialize(timeout=60000)
+    if not ok:
+        raise SystemExit(
+            f"Could not connect to the MT5 desktop app: {mt5.last_error()}.\n"
+            "  1. Open MT5 and log in, then wait until it shows prices.\n"
+            "  2. Run MT5 and this CMD window at the same privilege level (both normal, or both 'Run as administrator').\n"
+            "  3. 64-bit Python needs 64-bit MT5 (terminal64.exe).\n"
+            "  4. Several MT5 installs? Set MT5_PATH=C:\\Path\\To\\terminal64.exe")
     acc = mt5.account_info()
     if acc is None:
         raise SystemExit("MT5 is running but not logged in to an account.")
