@@ -158,8 +158,10 @@ def trend_filter(sig, s, n):
 
 
 # ---------------------------------------------------------------- engine
-def simulate(s, sig, sl_atr=1.5, rr=1.5, spread_pct=SPREAD_PCT, atr_n=14, max_hold=MAX_HOLD):
-    """Returns [(epoch, R)] for trades taken one at a time. No lookahead: decide on bar i, enter at open of i+1."""
+def simulate(s, sig, sl_atr=1.5, rr=1.5, spread_pct=SPREAD_PCT, atr_n=14, max_hold=MAX_HOLD, stop_fill="level"):
+    """Returns [(epoch, R)] for trades taken one at a time. No lookahead: decide on bar i, enter at open of i+1.
+    stop_fill="level" books a stop-out at exactly -1R. stop_fill="extreme" books it at the candle's worst price (a spike
+    jumps through the stop), which can be much worse than -1R. Use it on jumpy markets such as Boom/Crash."""
     atr, out, i = s.atr(atr_n), [], atr_n + 1
     while i < s.n - 2:
         if sig[i] == 0 or atr[i] is None or s.t[i + 1] - s.t[i] > 3 * s.gran:     # skip weekend-gap entries
@@ -174,7 +176,11 @@ def simulate(s, sig, sl_atr=1.5, rr=1.5, spread_pct=SPREAD_PCT, atr_n=14, max_ho
             hit_sl = s.l[j] <= sl if buy else s.h[j] >= sl
             hit_tp = s.h[j] >= tp if buy else s.l[j] <= tp
             if hit_sl:
-                r = -1.0                                  # stop first when both are inside one bar (conservative)
+                if stop_fill == "extreme":                # fill at the bar's worst price, not at the stop level
+                    worst = s.l[j] if buy else s.h[j]
+                    r = -max(1.0, abs(entry - worst) / dist)
+                else:
+                    r = -1.0                              # stop first when both are inside one bar (conservative)
             elif hit_tp:
                 r = rr
             if r is not None:
@@ -214,14 +220,14 @@ def verdict(trades, min_trades=300):
     return "FAIL"
 
 
-def random_baseline(s, n_trades, sl_atr, rr, spread_pct, observed, trials=100, seed=7):
+def random_baseline(s, n_trades, sl_atr, rr, spread_pct, observed, trials=100, seed=7, stop_fill="level"):
     """Same exits and costs, random entries. Returns the share of random runs at least as good as `observed`."""
     if n_trades < 10:
         return None
     rng, q, better = random.Random(seed), min(0.5, n_trades / max(1, s.n)), 0
     for _ in range(trials):
         sig = [rng.choice((1, -1)) if rng.random() < q else 0 for _ in range(s.n)]
-        t = simulate(s, sig, sl_atr, rr, spread_pct)
+        t = simulate(s, sig, sl_atr, rr, spread_pct, stop_fill=stop_fill)
         if t and sum(r for _, r in t) / len(t) >= observed:
             better += 1
     return better / trials
@@ -234,7 +240,7 @@ def line(name, trades, s=None, args=None):
         return f"{name:<24} no trades"
     base = ""
     if s is not None and args is not None:
-        p = random_baseline(s, a["n"], args.sl_atr, args.rr, args.spread_pct, a["mean"])
+        p = random_baseline(s, a["n"], args.sl_atr, args.rr, args.spread_pct, a["mean"], stop_fill=args.stop_fill)
         base = f"  random>=: {p:.0%}" if p is not None else ""
     return (f"{name:<24} n={a['n']:<5} win {a['wins'] / a['n']:5.1%}  exp {a['mean']:+.3f}R [{a['lo']:+.3f},{a['hi']:+.3f}]  "
             f"1st {h1['mean']:+.3f} 2nd {h2['mean']:+.3f}  {verdict(trades):<9}{base}")
@@ -267,10 +273,10 @@ def load_series(args):
 
 def cmd_compare(args):
     s = load_series(args)
-    print(f"filters: session {args.session or 'any'}, trend {args.trend or 'none'}\n")
+    print(f"filters: session {args.session or 'any'}, trend {args.trend or 'none'}, stop fills: {args.stop_fill}\n")
     for name, (_, params, _) in STRATEGIES.items():
         sig = build_signals(s, name, params, args.session, args.trend)
-        print(line(name, simulate(s, sig, args.sl_atr, args.rr, args.spread_pct), s, args))
+        print(line(name, simulate(s, sig, args.sl_atr, args.rr, args.spread_pct, stop_fill=args.stop_fill), s, args))
     print("\nPASS = >=300 trades and 95% interval above 0 in BOTH halves. 'random>=' = share of random-entry runs at least this good.")
 
 
@@ -286,8 +292,8 @@ def cmd_sweep(args):
         Series([(s.t[i], s.o[i], s.h[i], s.l[i], s.c[i]) for i in range(mid, s.n)], s.gran)
     scored = []
     for p in combos:
-        tr = simulate(train, build_signals(train, args.name, p, args.session, args.trend), args.sl_atr, args.rr, args.spread_pct)
-        te = simulate(test, build_signals(test, args.name, p, args.session, args.trend), args.sl_atr, args.rr, args.spread_pct)
+        tr = simulate(train, build_signals(train, args.name, p, args.session, args.trend), args.sl_atr, args.rr, args.spread_pct, stop_fill=args.stop_fill)
+        te = simulate(test, build_signals(test, args.name, p, args.session, args.trend), args.sl_atr, args.rr, args.spread_pct, stop_fill=args.stop_fill)
         scored.append((p, tr, te))
     ok = [x for x in scored if len(x[1]) >= 30]
     if not ok:
@@ -324,6 +330,7 @@ def main(argv=None):
     p.add_argument("--sl-atr", type=float, default=1.5)
     p.add_argument("--rr", type=float, default=1.5)
     p.add_argument("--spread-pct", type=float, default=SPREAD_PCT)
+    p.add_argument("--stop-fill", choices=["level", "extreme"], default="level", help="extreme = book stop-outs at the candle's worst price (use on Boom/Crash)")
     p.add_argument("--session", default=None, help="UTC hours, e.g. 12-17")
     p.add_argument("--trend", type=int, default=0, help="only trade with the n-bar average, e.g. 200")
     args = p.parse_args(argv)

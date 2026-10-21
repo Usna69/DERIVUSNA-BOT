@@ -118,3 +118,9 @@ significant yet; `random>=` shows how often random entries with the same exits b
 - Common reasons for no trade: signals are rare (a 10/30 crossover fires about every 2-3 hours on M5), the spread is above
   `MT5_MAX_SPREAD_FRAC` (0.25) of the stop, or the minimum lot risks more than `MT5_RISK_USD`.
 - The dashboard's mt5 tab now shows the real symbols (it used to show the options bot's symbol).
+
+### Jumpy markets: use `--stop-fill extreme`
+On Boom/Crash/Jump indices a spike jumps through stop levels, so a stop-out is often far worse than -1R. The default
+(`--stop-fill level`) books exactly -1R and makes those markets look profitable (Boom 1000 donchian: +0.23R, "PASS").
+`run.bat lab compare --symbol BOOM1000 --stop-fill extreme` books stop-outs at the candle's worst price: every strategy then
+fails (-0.18R to -0.36R). Always run jumpy markets in both modes.

@@ -87,6 +87,20 @@ class SimulateTests(unittest.TestCase):
         (t, r), = lab.simulate(s, self.sig_at(s, 30), 1.5, 1.5, 0.0)
         self.assertAlmostEqual(r, -1.0)
 
+    def test_extreme_stop_fill_books_the_gap_past_the_stop(self):
+        s = self.series_with_trade((100.0, 100.2, 90.0, 95.0))          # stop at 98.5, bar low far beyond it
+        (t, level), = lab.simulate(s, self.sig_at(s, 30), 1.5, 1.5, 0.0, stop_fill="level")
+        (t, worst), = lab.simulate(s, self.sig_at(s, 30), 1.5, 1.5, 0.0, stop_fill="extreme")
+        self.assertAlmostEqual(level, -1.0)
+        self.assertLess(worst, -5.0)                                    # (100-90)/1.5 = -6.7R
+
+    def test_extreme_fill_never_beats_the_level_fill(self):
+        s = make(walk(2500, seed=4, step=1.0))
+        sig = lab.sma_cross(s)
+        a = sum(r for _, r in lab.simulate(s, sig, 1.5, 1.5, 0.0, stop_fill="level"))
+        b = sum(r for _, r in lab.simulate(s, sig, 1.5, 1.5, 0.0, stop_fill="extreme"))
+        self.assertLessEqual(b, a + 1e-9)
+
     def test_sell_mirrors_buy(self):
         s = self.series_with_trade((100.0, 100.1, 97.0, 98.0))
         (t, r), = lab.simulate(s, self.sig_at(s, 30, -1), 1.5, 1.5, 0.0)
