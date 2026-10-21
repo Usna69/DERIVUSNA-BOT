@@ -200,7 +200,7 @@ class DbTests(unittest.TestCase):
                 c.execute(f"drop table if exists {tbl}")
         db.init()
         with psycopg.connect(db.DB_URL) as c:
-            self.assertEqual(c.execute("select count(*) from information_schema.tables where table_name in ('trades','events','bot_status')").fetchone()[0], 3)
+            self.assertEqual(c.execute("select count(*) from information_schema.tables where table_name in ('trades','events','bot_status','lab_runs','positions')").fetchone()[0], 5)
 
     def test_simultaneous_first_writes_all_succeed(self):
         """The bot's start alert and heartbeat race to create the tables; before the lock, 7 of 8 writes were lost."""

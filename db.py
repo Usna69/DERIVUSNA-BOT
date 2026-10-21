@@ -152,8 +152,8 @@ def init():
         raise SystemExit("DATABASE_URL is not set in this window.")
     with psycopg.connect(DB_URL, connect_timeout=15, autocommit=True) as conn:
         _ensure_schema(conn)
-        n = conn.execute("select count(*) from information_schema.tables where table_name in ('trades','events','bot_status')").fetchone()[0]
-    print(f"database connected; {n}/3 tables ready (trades, events, bot_status)")
+        n = conn.execute("select count(*) from information_schema.tables where table_name in ('trades','events','bot_status','lab_runs','positions')").fetchone()[0]
+    print(f"database connected; {n}/5 tables ready (trades, events, bot_status, lab_runs, positions)")
 
 
 if __name__ == "__main__":
