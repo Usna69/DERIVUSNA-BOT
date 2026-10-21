@@ -14,6 +14,7 @@ if "%1"=="mt5backtest" python mt5_backtest.py & exit /b
 if "%1"=="mt5" python mt5_bot.py run & exit /b
 if "%1"=="mt5live" goto mt5live
 if "%1"=="demo" goto demo
+if not "%1"=="" if not "%1"=="paper" (echo Unknown command "%1". See the Usage line at the top of run.bat. & exit /b 1)
 set BOT_MODE=paper
 python deriv_bot.py
 exit /b

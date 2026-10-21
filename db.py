@@ -3,7 +3,7 @@ Optional Postgres sink for the dashboard. Set DATABASE_URL to enable; unset = bo
 Every function swallows errors (and prints at most one warning per 5 min): a database outage must never
 stop the bot or lose a trade, because trades.csv stays the primary log.
 """
-import os, time
+import os, threading, time
 
 DB_URL = os.getenv("DATABASE_URL", "")
 
@@ -30,6 +30,7 @@ create table if not exists bot_status (
 
 _ready = False
 _last_warn = 0.0
+_schema_lock = threading.Lock()                      # bot threads start together; only one may create the tables
 
 
 def enabled():
@@ -43,16 +44,27 @@ def _warn(e):
         print(f"database unavailable ({e.__class__.__name__}); continuing without it")
 
 
-def _exec(sql, params=()):
+def _ensure_schema(conn):
+    """Create tables once per process. The advisory lock also serialises separate processes (bot + dbinit)."""
     global _ready
+    if _ready:
+        return
+    with _schema_lock:
+        if _ready:
+            return
+        with conn.transaction():
+            conn.execute("select pg_advisory_xact_lock(727272)")
+            conn.execute(SCHEMA)
+        _ready = True
+
+
+def _exec(sql, params=()):
     if not DB_URL:
         return
     try:
         import psycopg
         with psycopg.connect(DB_URL, connect_timeout=10, autocommit=True) as conn:
-            if not _ready:
-                conn.execute(SCHEMA)
-                _ready = True
+            _ensure_schema(conn)
             conn.execute(sql, params)
     except Exception as e:                           # noqa: BLE001 - must never raise into the bot
         _warn(e)
@@ -82,7 +94,7 @@ def init():
     if not DB_URL:
         raise SystemExit("DATABASE_URL is not set in this window.")
     with psycopg.connect(DB_URL, connect_timeout=15, autocommit=True) as conn:
-        conn.execute(SCHEMA)
+        _ensure_schema(conn)
         n = conn.execute("select count(*) from information_schema.tables where table_name in ('trades','events','bot_status')").fetchone()[0]
     print(f"database connected; {n}/3 tables ready (trades, events, bot_status)")
 
