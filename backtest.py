@@ -7,12 +7,30 @@ Backtest the SMA-crossover strategy from deriv_bot.py on past ticks (public feed
 Uses the same signal(), stake, duration, cooldown and daily limits as the live bot.
 PAYOUT is the assumed profit ratio on a win; check real proposals on demo, it varies.
 """
-import asyncio, json, os, time
+import asyncio, csv, json, os, time
 import websockets
 import deriv_bot as b
 
 TICKS = int(os.getenv("TICKS", "20000"))
-PAYOUT = float(os.getenv("PAYOUT", str(b.PAPER_PAYOUT)))
+
+
+def measured_payout():
+    """Mean real payout ratio from demo/real trades in trades.csv, or None."""
+    try:
+        with open(b.LOG, newline="") as f:
+            r = [float(x["payout_ratio"]) for x in csv.DictReader(f) if x["mode"] != "paper" and x.get("payout_ratio")]
+    except (OSError, KeyError, ValueError):
+        return None
+    return sum(r) / len(r) if r else None
+
+
+_m = measured_payout()
+if os.getenv("PAYOUT"):
+    PAYOUT, PAYOUT_SRC = float(os.environ["PAYOUT"]), "PAYOUT env"
+elif _m:
+    PAYOUT, PAYOUT_SRC = _m, "measured from trades.csv"
+else:
+    PAYOUT, PAYOUT_SRC = b.PAPER_PAYOUT, "assumed default"
 
 
 async def fetch(n):
@@ -65,7 +83,7 @@ def run(rows):
         i += 1
     n = wins + losses
     span_h = (rows[-1][0] - rows[0][0]) / 3600
-    print(f"{b.SYMBOL}: {len(rows)} ticks over {span_h:.1f}h, stake {b.STAKE}, {b.DURATION_TICKS}-tick contracts, payout {PAYOUT:.0%}")
+    print(f"{b.SYMBOL}: {len(rows)} ticks over {span_h:.1f}h, stake {b.STAKE}, {b.DURATION_TICKS}-tick contracts, payout {PAYOUT:.1%} ({PAYOUT_SRC})")
     if not n:
         print("no trades triggered")
         return

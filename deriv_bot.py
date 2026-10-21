@@ -32,12 +32,37 @@ PUBLIC_WS = "wss://api.derivws.com/trading/v1/options/ws/public"
 SYMBOL = os.getenv("SYMBOL", "R_100")               # Volatility 100 Index
 STAKE = float(os.getenv("STAKE", "1"))              # fixed, never increased after a loss
 DURATION_TICKS = int(os.getenv("DURATION_TICKS", "5"))
-FAST, SLOW = 10, 30                                 # SMA lengths in ticks
-COOLDOWN_S = 30                                     # min seconds between trades
+FAST = int(os.getenv("FAST", "10"))                 # SMA lengths in ticks
+SLOW = int(os.getenv("SLOW", "30"))
+COOLDOWN_S = int(os.getenv("COOLDOWN_S", "30"))                                    # min seconds between trades
 MAX_TRADES_PER_DAY = int(os.getenv("MAX_TRADES", "20"))
 MAX_DAILY_LOSS = float(os.getenv("MAX_DAILY_LOSS", "5"))   # stop for the day at this loss
 PAPER_PAYOUT = 0.95                                 # assumed payout ratio in paper mode
 LOG = "trades.csv"
+HEADER = ["time", "mode", "symbol", "direction", "stake", "profit", "day_pnl", "ask_price", "payout_ratio"]
+TG_TOKEN = os.getenv("TELEGRAM_TOKEN", "")          # optional alerts; get a token from @BotFather
+TG_CHAT = os.getenv("TELEGRAM_CHAT_ID", "")
+
+
+def send_telegram(text):
+    """Best-effort alert. Never raises, so a Telegram outage cannot stop the bot."""
+    if not (TG_TOKEN and TG_CHAT):
+        return
+    try:
+        body = json.dumps({"chat_id": TG_CHAT, "text": text}).encode()
+        req = urllib.request.Request(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage", data=body,
+                                     headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(req, timeout=10).close()
+    except Exception as e:
+        print("telegram failed:", e.__class__.__name__)
+
+
+def alert(text):
+    print(f"[alert] {text}")
+    try:
+        asyncio.get_running_loop().create_task(asyncio.to_thread(send_telegram, f"{MODE}: {text}"))
+    except RuntimeError:                             # no running loop
+        send_telegram(f"{MODE}: {text}")
 
 
 def sma(xs, n):
@@ -71,6 +96,8 @@ class Bot:
         self.open_paper = None                      # (direction, entry, ticks_left)
         self.busy = False
         self.day = time.strftime("%Y-%m-%d")
+        self.limit_alerted = False
+        self.resumed = False                        # True after a reconnect, to skip the start alert
 
     async def call(self, payload):
         self.req += 1
@@ -93,20 +120,25 @@ class Bot:
                 await self.on_tick(float(m["tick"]["quote"]))
 
     def log(self, row):
+        if os.path.exists(LOG):                      # old column layout: keep it, start a fresh log
+            with open(LOG, newline="") as f:
+                if next(csv.reader(f), None) != HEADER:
+                    os.replace(LOG, f"trades_old_{int(time.time())}.csv")
         new = not os.path.exists(LOG)
         with open(LOG, "a", newline="") as f:
             w = csv.writer(f)
             if new:
-                w.writerow(["time", "mode", "symbol", "direction", "stake", "profit", "day_pnl"])
+                w.writerow(HEADER)
             w.writerow(row)
 
     def allowed(self):
         today = time.strftime("%Y-%m-%d")
         if today != self.day:                        # new day: reset limits
-            self.day, self.pnl, self.trades = today, 0.0, 0
-        if self.pnl <= -MAX_DAILY_LOSS:
-            return False
-        if self.trades >= MAX_TRADES_PER_DAY:
+            self.day, self.pnl, self.trades, self.limit_alerted = today, 0.0, 0, False
+        if self.pnl <= -MAX_DAILY_LOSS or self.trades >= MAX_TRADES_PER_DAY:
+            if not self.limit_alerted:
+                self.limit_alerted = True
+                alert(f"daily limit hit: pnl {self.pnl:+.2f}, trades {self.trades}. Pausing until tomorrow.")
             return False
         return time.time() - self.last_trade >= COOLDOWN_S
 
@@ -121,8 +153,8 @@ class Bot:
                 win = price > entry if d == "CALL" else price < entry
                 profit = STAKE * PAPER_PAYOUT if win else -STAKE
                 self.pnl += profit
-                self.log([time.strftime("%H:%M:%S"), MODE, SYMBOL, d, STAKE, round(profit, 2), round(self.pnl, 2)])
-                print(f"paper {d} {'WIN' if win else 'LOSS'} {profit:+.2f}  day {self.pnl:+.2f}")
+                self.log([time.strftime("%H:%M:%S"), MODE, SYMBOL, d, STAKE, round(profit, 2), round(self.pnl, 2), "", PAPER_PAYOUT])
+                alert(f"paper {d} {'WIN' if win else 'LOSS'} {profit:+.2f}, day {self.pnl:+.2f}")
                 self.open_paper = None
             return
         if len(self.ticks) < SLOW + 1 or self.busy or not self.allowed():
@@ -145,13 +177,15 @@ class Bot:
                                  "currency": self.currency, "duration": DURATION_TICKS,
                                  "duration_unit": "t", "underlying_symbol": SYMBOL})
             prop = p["proposal"]
+            ask = float(prop["ask_price"])
+            ratio = round((float(prop["payout"]) - ask) / ask, 4)   # real profit ratio on a win
             b = await self.call({"buy": prop["id"], "price": prop["ask_price"]})
             cid = b["buy"]["contract_id"]
-            print(f"{MODE} {direction} bought, contract {cid}")
-            self.open_contracts[cid] = direction
+            print(f"{MODE} {direction} bought, contract {cid}, ask {ask}, payout {ratio:.1%}")
+            self.open_contracts[cid] = (direction, ask, ratio)
             await self.settle(cid)
         except Exception as e:
-            print("trade error:", e)
+            alert(f"trade error: {e}")
         finally:
             self.busy = False
 
@@ -161,13 +195,14 @@ class Bot:
             await asyncio.sleep(2)
             c = (await self.call({"proposal_open_contract": 1, "contract_id": cid}))["proposal_open_contract"]
             if c.get("is_sold"):
-                direction = self.open_contracts.pop(cid, None)
-                if direction is None:                # already booked
+                info = self.open_contracts.pop(cid, None)
+                if info is None:                     # already booked
                     return
+                direction, ask, ratio = info
                 profit = float(c["profit"])
                 self.pnl += profit
-                self.log([time.strftime("%H:%M:%S"), MODE, SYMBOL, direction, STAKE, profit, round(self.pnl, 2)])
-                print(f"{direction} {profit:+.2f}  day {self.pnl:+.2f}")
+                self.log([time.strftime("%H:%M:%S"), MODE, SYMBOL, direction, STAKE, profit, round(self.pnl, 2), ask, ratio])
+                alert(f"{direction} {'WIN' if profit > 0 else 'LOSS'} {profit:+.2f}, day {self.pnl:+.2f}")
                 return
 
     async def resume(self, cid):
@@ -183,6 +218,8 @@ class Bot:
             print(f"resuming contract {cid}")
             asyncio.create_task(self.resume(cid))
         print(f"{MODE} mode on {SYMBOL}, stake {STAKE}, daily loss limit {MAX_DAILY_LOSS}. Ctrl+C to stop.")
+        if not self.resumed:
+            alert(f"started on {SYMBOL}, stake {STAKE}, daily loss limit {MAX_DAILY_LOSS}")
         await reader
 
 
@@ -223,6 +260,7 @@ async def main():
                 bot = Bot(ws, state.get("open_contracts"))
                 bot.__dict__.update({k: v for k, v in state.items() if k != "open_contracts"})
                 bot.currency = cur
+                bot.resumed = bool(state)
                 wait = 2
                 try:
                     await bot.run()
@@ -237,7 +275,7 @@ async def main():
         except ApiError as e:
             raise SystemExit(f"Deriv API error: {e}")
         except (websockets.ConnectionClosed, OSError, asyncio.TimeoutError) as e:
-            print(f"connection lost ({e.__class__.__name__}); retrying in {wait}s")
+            alert(f"connection lost ({e.__class__.__name__}); retrying in {wait}s")
             await asyncio.sleep(wait)
             wait = min(wait * 2, 60)
 

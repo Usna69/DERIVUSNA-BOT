@@ -33,3 +33,16 @@ python backtest.py                      # last 24h of ticks (the feed's history 
 PAYOUT=0.95 python backtest.py
 ```
 Replays the same SMA signal and limits on past ticks. Break-even win rate is 1/(1+payout), about 51.3% at 95%.
+
+## Telegram alerts (optional)
+Create a bot with @BotFather, message it once, then get your chat id from `https://api.telegram.org/bot<TOKEN>/getUpdates`.
+```
+set TELEGRAM_TOKEN=...     :: keep secret, never commit
+set TELEGRAM_CHAT_ID=...
+```
+You get alerts for start, each trade result, errors, disconnects and "daily limit hit". No token set = no alerts.
+
+## Measuring
+`trades.csv` now records `ask_price` and `payout_ratio` per trade. `backtest.py` uses the mean real payout from
+demo/real rows when it exists (else `PAYOUT` env, else 95%). An old-layout `trades.csv` is kept as `trades_old_<time>.csv`.
+`FAST`, `SLOW` and `COOLDOWN_S` are now env settings.
