@@ -14,8 +14,10 @@ Strategy: SMA crossover on closed bars, ATR-based stop. NOT validated: run.bat m
 """
 import math, os, sys, time
 
-os.environ.setdefault("BOT_MODE", "mt5")             # tags alerts, trades.csv rows, state file and dashboard tab
+os.environ["BOT_MODE"] = "mt5"                       # always: tags alerts, trades.csv rows, state file and dashboard tab
+
 import deriv_bot as d
+import db
 
 SYMBOL = os.getenv("MT5_SYMBOL", "auto")             # auto = best feasible from the scan
 TF_NAME = os.getenv("MT5_TF", "M15")
@@ -30,6 +32,10 @@ EQUITY_FLOOR = float(os.getenv("MT5_EQUITY_FLOOR", "5.0"))   # below this equity
 MAX_TRADES = int(os.getenv("MT5_MAX_TRADES", "6"))
 MAX_SPREAD_FRAC = float(os.getenv("MT5_MAX_SPREAD_FRAC", "0.25"))   # spread must be <= this share of the stop distance
 ALLOW_SYNTHETIC = os.getenv("MT5_ALLOW_SYNTHETIC") == "1"   # Boom/Crash/Volatility/Step: random by design, no edge possible
+SYMBOLS = [x.strip() for x in os.getenv("MT5_SYMBOLS", "").split(",") if x.strip()]   # several pairs at once, shared loss caps
+STATUS_S = int(os.getenv("MT5_STATUS_S", "900"))     # print a status line this often so a quiet bot is not a mystery
+STRATEGY = os.getenv("MT5_STRATEGY", "sma_cross")    # sma_cross | rsi_revert | bb_revert | donchian | trend_pullback (see lab.py)
+TF_SECONDS = {"M1": 60, "M5": 300, "M15": 900, "M30": 1800, "H1": 3600, "H4": 14400, "D1": 86400}
 MAGIC = 20260101
 POLL_S = 5
 mt5 = None                                           # MetaTrader5 module, set by connect() (tests inject a fake)
@@ -147,16 +153,32 @@ def is_synthetic(si):
     return any(w in text for w in ("derived", "synthetic", "volatility", "boom", "crash", "step ", "jump", "range break", "dex "))
 
 
+def bars_needed():
+    """Closed bars to load: enough for ATR and the chosen rule (trend_pullback needs a 200-bar average)."""
+    return max(max(SLOW, ATR_N) + 5, 0 if STRATEGY == "sma_cross" else 260)
+
+
+def strategy_signal(closes, rows):
+    """'CALL', 'PUT' or None for the last closed bar, using the rule in MT5_STRATEGY (same code the lab tested)."""
+    if STRATEGY == "sma_cross":
+        return d.signal(closes, FAST, SLOW)
+    import lab
+    s = lab.Series(rows, TF_SECONDS.get(TF_NAME, 300))
+    sig = lab.STRATEGIES[STRATEGY][0](s, **lab.STRATEGIES[STRATEGY][1])[-1]
+    return "CALL" if sig == 1 else "PUT" if sig == -1 else None
+
+
 def symbol_view(symbol):
-    """(si, tick, atr, closes) for one symbol, or None if unusable."""
+    """(si, tick, atr, closes, rows) for one symbol, or None if unusable. rows = (time, open, high, low, close)."""
     if not mt5.symbol_select(symbol, True):
         return None
     si, tick = mt5.symbol_info(symbol), mt5.symbol_info_tick(symbol)
-    r = bars(symbol, max(SLOW, ATR_N) + 5)
+    r = bars(symbol, bars_needed())
     if si is None or tick is None or r is None or si.trade_mode != 4:      # 4 = full trading allowed
         return None
     a = atr([x["high"] for x in r], [x["low"] for x in r], [x["close"] for x in r], ATR_N)
-    return (si, tick, a, [float(x["close"]) for x in r]) if a else None
+    rows = [(int(x["time"]), float(x["open"]), float(x["high"]), float(x["low"]), float(x["close"])) for x in r]
+    return (si, tick, a, [float(x["close"]) for x in r], rows) if a else None
 
 
 def scan(print_rows=True):
@@ -168,7 +190,7 @@ def scan(print_rows=True):
         v = symbol_view(s.name)
         if not v:
             continue
-        si, tick, a, _ = v
+        si, tick, a = v[:3]
         mid = (tick.ask + tick.bid) / 2
         dist = max(a * SL_ATR, (si.trade_stops_level + 2) * si.point)
         per_lot = abs(mt5.order_calc_profit(0, s.name, 1.0, tick.ask, tick.ask - dist) or dist * si.trade_contract_size)
@@ -184,18 +206,53 @@ def scan(print_rows=True):
     return [x["symbol"] for x in ok]
 
 
+def skip_key(reason):
+    """Short label for why a signal was not traded, for the status line."""
+    if reason.startswith("spread"):
+        return "spread too wide"
+    if reason.startswith("min lot"):
+        return "min lot above risk limit"
+    return reason[:30]
+
+
 class Runner:
-    def __init__(self, orders_enabled, symbol):
+    def __init__(self, orders_enabled, symbol, pool=None, legacy_state=False):
         self.orders = orders_enabled
         self.symbol = symbol
+        folder = os.path.dirname(d.STATE_FILE)        # same folder as the main state file (tests point it at a temp dir)
+        self.state_file = os.path.join(folder, f"state_mt5_{symbol}.json")
+        legacy = os.path.join(folder, "state_mt5.json")
+        if legacy_state and not os.path.exists(self.state_file) and os.path.exists(legacy):
+            self.state_file = legacy                  # single-symbol run from before per-symbol files existed
         self.state = d.Bot(None)                     # reused as the persisted-state container (pnl, trades, day)
-        saved = d.load_state()
+        saved = d.load_state(self.state_file)
         self.state.__dict__.update({k: v for k, v in saved.items() if k != "open_contracts"})
         self.state.open_contracts = saved.get("open_contracts", {})
+        self.pool = pool if pool is not None else [self]     # runners sharing the daily loss and trade caps
         self.last_bar = 0
         self.fails = 0
         self.halted = False
+        self.limited = False
         self.warned = set()
+        self.counts = {"bars": 0, "signals": 0, "opened": 0, "skipped": {}}
+
+    def save(self):
+        d.save_state(self.state, self.state_file)
+
+    def open_pnl(self):
+        return sum(p.profit for p in self.positions())
+
+    def day_total(self):
+        return sum(r.state.pnl + r.open_pnl() for r in self.pool)
+
+    def trades_total(self):
+        return sum(r.state.trades for r in self.pool)
+
+    def status_line(self):
+        c = self.counts
+        skipped = ", ".join(f"{k} x{v}" for k, v in c["skipped"].items()) or "none"
+        return (f"[status] {self.symbol} {TF_NAME} {STRATEGY}: bars {c['bars']}, signals {c['signals']}, opened {c['opened']}, "
+                f"skipped: {skipped} | day {self.state.pnl:+.2f} USD")
 
     def warn_once(self, key, text):
         if key not in self.warned:
@@ -207,7 +264,7 @@ class Runner:
         if self.state.day != today:
             self.state.day, self.state.pnl, self.state.trades, self.state.limit_alerted = today, 0.0, 0, False
             self.warned.clear()
-            d.save_state(self.state)
+            self.save()
 
     def positions(self):
         return [p for p in (mt5.positions_get(symbol=self.symbol) or []) if p.magic == MAGIC]
@@ -222,8 +279,8 @@ class Runner:
             self.state.pnl += pnl
             self.state.log([time.strftime("%H:%M:%S"), "mt5", self.symbol, direction, round(risk, 2), round(pnl, 2),
                             round(self.state.pnl, 2), entry, None], ticket)
-            d.save_state(self.state)
-            d.alert(f"{direction} closed {pnl:+.2f} USD, day {self.state.pnl:+.2f}")
+            self.save()
+            d.alert(f"{self.symbol} {direction} closed {pnl:+.2f} USD, day {self.state.pnl:+.2f}")
 
     def blocked(self, acc):
         if self.halted:
@@ -234,13 +291,16 @@ class Runner:
             self.halted = True
             d.alert(f"equity {acc.equity:.2f} below floor {EQUITY_FLOOR:.2f}: bot halted for good. Delete state and restart to resume.")
             return "equity floor"
-        open_pnl = sum(p.profit for p in self.positions())
-        if self.state.pnl + open_pnl <= -DAILY_LOSS_USD:
-            self.warn_once("daily", f"daily loss cap hit ({self.state.pnl + open_pnl:+.2f} USD): no new trades today.")
+        total = self.day_total()
+        if total <= -DAILY_LOSS_USD:
+            self.limited = True
+            self.warn_once("daily", f"daily loss cap hit ({total:+.2f} USD across {len(self.pool)} pair(s)): no new trades today.")
             return "daily loss cap"
-        if self.state.trades >= MAX_TRADES:
+        if self.trades_total() >= MAX_TRADES:
+            self.limited = True
             self.warn_once("maxtr", f"max {MAX_TRADES} trades today reached.")
             return "max trades"
+        self.limited = False
         if self.positions():
             return "position open"
         return None
@@ -254,18 +314,24 @@ class Runner:
         v = symbol_view(self.symbol)
         if not v:
             return "no market data"
-        si, tick, a, closes = v
+        si, tick, a, closes, rows = v
         bar = int(mt5.copy_rates_from_pos(self.symbol, tf_const(TF_NAME), 1, 1)[0]["time"])
         if bar == self.last_bar and not check_only:
             return "waiting for next bar"
         self.last_bar = bar
-        direction = d.signal(closes, FAST, SLOW)
+        self.counts["bars"] += 1
+        direction = strategy_signal(closes, rows)
         if not direction and not check_only:
             return "no signal"
+        if direction:
+            self.counts["signals"] += 1
         direction = direction or "CALL"             # check mode: validate an order even without a signal
         plan, reason = plan_order(si, tick, direction, a, RISK_USD, mt5.order_calc_profit)
         if not plan:
-            self.warn_once(f"skip-{reason[:20]}", f"signal {direction} skipped: {reason}")
+            key = skip_key(reason)
+            self.counts["skipped"][key] = self.counts["skipped"].get(key, 0) + 1
+            print(f"  {self.symbol}: signal {direction} skipped ({key} #{self.counts['skipped'][key]}): {reason}")
+            self.warn_once(f"skip-{key}", f"{self.symbol} signal {direction} skipped: {reason}")
             return "skipped"
         req = request_for(si, plan)
         chk = mt5.order_check(req)
@@ -287,9 +353,16 @@ class Runner:
         self.fails = 0
         self.state.trades += 1
         self.state.open_contracts[res.order] = (direction, plan["entry"], plan["risk"])
-        d.save_state(self.state)
+        self.save()
+        self.counts["opened"] += 1
         d.alert(f"OPENED {desc}")
         return "opened"
+
+
+def orders_enabled(cmd, env=None):
+    """Orders only for `run` with MT5_ORDERS=1. `signals` and `check` never place orders, whatever the environment says."""
+    env = os.environ if env is None else env
+    return cmd == "run" and env.get("MT5_ORDERS") == "1"
 
 
 def diag():
@@ -330,44 +403,72 @@ def main(argv):
     if len(argv) > 1 and argv[1] == "diag":
         return diag()
     cmd = argv[1] if len(argv) > 1 else "check"
+    if cmd not in ("scan", "check", "run", "signals"):
+        raise SystemExit("usage: mt5_bot.py scan | check | signals | run   (only `run` can place orders, and only with MT5_ORDERS=1)")
     acc = connect()
     real = is_real(acc)
     print(f"account {acc.login} {'REAL' if real else 'DEMO'}, balance {acc.balance:.2f} {acc.currency}, equity {acc.equity:.2f}")
     if cmd == "scan":
         scan()
         return
-    symbol = SYMBOL
-    if symbol != "auto":
-        si = mt5.symbol_info(symbol)
-        if si is not None and is_synthetic(si) and not ALLOW_SYNTHETIC:
-            raise SystemExit(f"{symbol} is a synthetic index: a random-number product with no exploitable pattern, so this "
-                             "strategy cannot have an edge there. Set MT5_ALLOW_SYNTHETIC=1 only if you accept that.")
-    if symbol == "auto":
+    if STRATEGY != "sma_cross":
+        import lab
+        if STRATEGY not in lab.STRATEGIES:
+            raise SystemExit(f"unknown MT5_STRATEGY {STRATEGY!r}; choose from sma_cross, {', '.join(lab.STRATEGIES)}")
+    names = list(SYMBOLS) if SYMBOLS else [SYMBOL]
+    if names == ["auto"]:
         ranked = scan(print_rows=False)
         if not ranked:
             scan()
             raise SystemExit("\nNo symbol fits your risk limit at its minimum lot. Raise MT5_RISK_USD, use a shorter MT5_TF, "
                              "or add smaller-notional symbols to Market Watch. Nothing was traded.")
-        symbol = ranked[0]
-        print(f"auto-selected {symbol} (lowest spread among symbols that fit {RISK_USD:.2f} USD risk)")
-    orders = cmd == "run" and os.getenv("MT5_ORDERS") == "1"
+        names = [ranked[0]]
+        print(f"auto-selected {names[0]} (lowest spread among symbols that fit {RISK_USD:.2f} USD risk)")
+    for symbol in names:
+        si = mt5.symbol_info(symbol)
+        if si is None:
+            raise SystemExit(f"{symbol} is not available in this terminal. Add it to Market Watch (Ctrl+M, right-click, Symbols).")
+        if is_synthetic(si) and not ALLOW_SYNTHETIC:
+            raise SystemExit(f"{symbol} is a synthetic index: a random-number product with no exploitable pattern, so this "
+                             "strategy cannot have an edge there. Set MT5_ALLOW_SYNTHETIC=1 only if you accept that.")
+    orders = orders_enabled(cmd)
     if orders and real and os.getenv("ALLOW_REAL") != "1":
         raise SystemExit("Real account: set ALLOW_REAL=1 as well as MT5_ORDERS=1.")
-    r = Runner(orders, symbol)
+    pool = []                                        # runners share the daily loss cap and the daily trade cap
+    runners = [Runner(orders, s, pool, legacy_state=len(names) == 1) for s in names]
+    pool.extend(runners)
     if cmd == "check":
-        print("result:", r.step(acc, check_only=True))
+        for r in runners:
+            print(f"{r.symbol} result:", r.step(acc, check_only=True))
         return
-    print(f"{'PLACING ORDERS' if orders else 'signals only (set MT5_ORDERS=1 to place orders)'} on {symbol} {TF_NAME}, "
-          f"risk {RISK_USD:.2f} USD/trade, daily cap {DAILY_LOSS_USD:.2f} USD. Ctrl+C to stop.")
-    d.alert(f"mt5 started on {symbol} ({'REAL' if real else 'DEMO'}, orders {'ON' if orders else 'OFF'})")
+    label = "PLACING REAL ORDERS" if orders and real else "PLACING ORDERS (demo)" if orders else "SIGNALS ONLY, no orders"
+    print(f"{label} on {', '.join(names)} {TF_NAME}, strategy {STRATEGY}, risk {RISK_USD:.2f} USD/trade, daily cap {DAILY_LOSS_USD:.2f} USD, "
+          f"max {MAX_TRADES} trades/day (shared). Status line every {STATUS_S // 60} min. Ctrl+C to stop.")
+    d.alert(f"mt5 started on {', '.join(names)} ({'REAL' if real else 'DEMO'}, orders {'ON' if orders else 'OFF'})")
+    last_status, last_hb = time.time(), 0.0
     while True:
-        try:
-            acc = mt5.account_info()
-            r.step(acc)
-            r.state.heartbeat()
-        except Exception as e:                       # noqa: BLE001 - keep the loop alive, broker-side stops protect open trades
-            d.alert(f"mt5 loop error: {e}")
+        acc = mt5.account_info()
+        for r in runners:
+            try:
+                r.step(acc)
+            except Exception as e:                   # noqa: BLE001 - one pair failing must not stop the others
+                d.alert(f"mt5 {r.symbol} loop error: {e}")
+        last_hb = heartbeat(runners, last_hb)
+        if time.time() - last_status >= STATUS_S:
+            last_status = time.time()
+            for r in runners:
+                print(r.status_line())
         time.sleep(POLL_S)
+
+
+def heartbeat(runners, last, every=30):
+    """One dashboard row for the whole MT5 bot (symbols joined, P&L and trades summed). Returns the new 'last' time."""
+    if not db.enabled() or time.time() - last < every:
+        return last
+    status = "stopped" if os.path.exists(d.STOP_FILE) else "limit" if any(r.limited for r in runners) else "running"
+    d.bg(db.heartbeat, "mt5", ",".join(r.symbol for r in runners), round(sum(r.state.pnl for r in runners), 2),
+         sum(r.state.trades for r in runners), status, f"{STRATEGY} {TF_NAME}")
+    return time.time()
 
 
 if __name__ == "__main__":

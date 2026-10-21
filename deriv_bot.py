@@ -98,22 +98,23 @@ class ApiError(RuntimeError):
     pass
 
 
-def save_state(bot):
+def save_state(bot, path=None):
     """Atomic write so a crash mid-save cannot corrupt the file."""
     data = {"pnl": bot.pnl, "trades": bot.trades, "last_trade": bot.last_trade, "day": bot.day,
             "open_contracts": {str(k): list(v) for k, v in bot.open_contracts.items()}}
     try:
-        with open(STATE_FILE + ".tmp", "w") as f:
+        path = path or STATE_FILE
+        with open(path + ".tmp", "w") as f:
             json.dump(data, f)
-        os.replace(STATE_FILE + ".tmp", STATE_FILE)
+        os.replace(path + ".tmp", path)
     except OSError as e:
         print("could not save state:", e)
 
 
-def load_state():
+def load_state(path=None):
     """Restore counters (only for today) and any contracts left open. Returns {} if none."""
     try:
-        with open(STATE_FILE) as f:
+        with open(path or STATE_FILE) as f:
             d = json.load(f)
     except (OSError, ValueError):
         return {}

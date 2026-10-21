@@ -95,3 +95,48 @@ no trade if even the minimum lot risks more, one position at a time, daily loss 
 `MT5_EQUITY_FLOOR` (5.00, halts), max 6 trades/day, spread filter, `STOP` file, halt after 3 failed orders.
 `MT5_SYMBOL=auto` picks the lowest-spread symbol that fits the risk limit. Untested against a live MT5 terminal: validate with
 `mt5check` first. Trades appear on the dashboard under the `mt5` tab.
+
+## Strategy lab (no money, no MT5 needed)
+Tests ideas on ~4 months of real forex candles from Deriv's public feed (cached as `candles_<symbol>_<seconds>.csv`).
+```
+run.bat lab compare                         :: all strategies on USDJPY M5 (default)
+run.bat lab compare --session 12-17         :: only UTC 12:00-17:00 (London/NY overlap)
+run.bat lab compare --trend 200             :: only trade with the 200-bar average
+run.bat lab sweep sma_cross                 :: tune on the 1st half, judge on the 2nd (honest) half
+run.bat lab compare --symbol frxEURUSD --tf 900
+```
+Strategies: `sma_cross`, `rsi_revert`, `bb_revert`, `donchian`, `trend_pullback`. Entry is the open of the bar AFTER the signal,
+the spread is charged as a share of the stop (`--spread-pct`, 0.009 = your USDJPY), both-hit-in-one-bar counts as a loss.
+Verdict: PASS needs 300+ trades and a 95% interval above zero in BOTH halves; PROMISING = positive in both halves but not
+significant yet; `random>=` shows how often random entries with the same exits beat the strategy. Tests: `python -m unittest`.
+
+## MT5: several pairs, status line, why "no trades"
+- `set MT5_SYMBOLS=USDJPY,EURUSD,GBPUSD` runs all of them in one window. The daily loss cap (`MT5_DAILY_LOSS_USD`) and the
+  daily trade cap (`MT5_MAX_TRADES`) are shared across the pairs; each pair keeps its own `state_mt5_<pair>.json`.
+- Every 15 minutes (`MT5_STATUS_S`) it prints a line such as `[status] USDJPY M5: bars 90, signals 3, opened 0, skipped: spread too wide x3`,
+  so a quiet bot is explained. Each skipped signal is also printed when it happens.
+- Common reasons for no trade: signals are rare (a 10/30 crossover fires about every 2-3 hours on M5), the spread is above
+  `MT5_MAX_SPREAD_FRAC` (0.25) of the stop, or the minimum lot risks more than `MT5_RISK_USD`.
+- The dashboard's mt5 tab now shows the real symbols (it used to show the options bot's symbol).
+
+### Jumpy markets: use `--stop-fill extreme`
+On Boom/Crash/Jump indices a spike jumps through stop levels, so a stop-out is often far worse than -1R. The default
+(`--stop-fill level`) books exactly -1R and makes those markets look profitable (Boom 1000 donchian: +0.23R, "PASS").
+`run.bat lab compare --symbol BOOM1000 --stop-fill extreme` books stop-outs at the candle's worst price: every strategy then
+fails (-0.18R to -0.36R). Always run jumpy markets in both modes.
+
+## MT5: choose the rule (`MT5_STRATEGY`)
+`set MT5_STRATEGY=rsi_revert` (or `bb_revert`, `donchian`, `trend_pullback`; default `sma_cross`). The bot calls the exact functions
+the lab tested, on the closed bars of `MT5_TF`. Lab results (after spread) say `rsi_revert`/`bb_revert` lose least; none passed the gate.
+Longer candles cost less but need wider stops, so check `run.bat mt5scan` (risk at min lot) before using `MT5_TF=M15` or higher.
+
+## Lab on the dashboard
+```
+run.bat dbinit                              :: once after updating (creates the lab_runs table)
+set "DATABASE_URL=<your Neon string>"
+run.bat lab compare --publish               :: saves all 5 strategies for the pair/timeframe to the Lab page
+run.bat lab compare --symbol frxGBPUSD --tf 3600 --spread-pct 0.007 --publish --fast
+```
+`--fast` skips the random-entry baseline (much quicker). The dashboard's **Lab** page lists every published run with a verdict badge.
+On the **mt5** tab, "Live vs lab" shows the lab number for the rule and timeframe the live bot reports (`MT5_STRATEGY` and `MT5_TF`)
+next to the live average R. Restart the MT5 bot once after updating so it reports its strategy.
