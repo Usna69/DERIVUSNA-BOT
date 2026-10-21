@@ -9,7 +9,7 @@ type Status = { mode: string; symbol: string; day_pnl: string; trades_today: num
 type Row = { ts: Date; mode: string; symbol: string; direction: string; stake: string; profit: string; day_pnl: string; payout_ratio: string | null };
 type Event = { ts: Date; mode: string; level: string; text: string };
 
-const MODES = ["paper", "demo", "real"];
+const MODES = ["paper", "demo", "real", "mt5"];
 const money = (x: number) => `${x >= 0 ? "+" : "-"}${Math.abs(x).toFixed(2)}`;
 const pct = (x: number) => `${(x * 100).toFixed(1)}%`;
 const ago = (d: Date) => {
@@ -71,7 +71,14 @@ export default async function Home({ searchParams }: { searchParams: Promise<{ m
   const { statuses, mode, rows, events } = data;
   const trades: Trade[] = rows.map((r) => ({ ts: r.ts, direction: r.direction, stake: Number(r.stake), profit: Number(r.profit), payout_ratio: r.payout_ratio == null ? null : Number(r.payout_ratio) }));
   const s = summarize(trades);
-  const v = verdict(s);
+  const isMt5 = mode === "mt5";               // MT5 rows have no fixed payout: judge by average USD per trade
+  const v = isMt5
+    ? s.n < 100
+      ? { tone: "neutral" as const, text: `Only ${s.n} trades. Too few to tell skill from luck (aim for hundreds).` }
+      : s.pnl > 0
+        ? { tone: "neutral" as const, text: "Positive so far. Check it holds out of sample before trusting it." }
+        : { tone: "bad" as const, text: "Losing so far: average result per trade is not positive." }
+    : verdict(s);
   const st = statuses.find((x) => x.mode === mode);
   const stale = st ? Date.now() - new Date(st.last_seen).getTime() > 90_000 : true;
   const state = !st ? "no data yet" : stale ? "offline" : st.status;
@@ -108,7 +115,11 @@ export default async function Home({ searchParams }: { searchParams: Promise<{ m
         <Card label="Today" value={st ? money(Number(st.day_pnl)) : "—"} sub={st ? `${st.trades_today} trades` : undefined} tone={st ? (Number(st.day_pnl) >= 0 ? "good" : "bad") : undefined} />
         <Card label="All-time P&L" value={money(s.pnl)} sub={`${s.n} trades${s.n ? `, ${money(s.pnl / s.n)} each` : ""}`} tone={s.pnl >= 0 ? "good" : "bad"} />
         <Card label="Win rate" value={s.stats ? pct(s.stats.rate) : "—"} sub={s.stats ? `95% CI ${pct(s.stats.lo)}–${pct(s.stats.hi)}` : undefined} />
-        <Card label="Break-even" value={pct(1 / (1 + s.payout))} sub={`payout ${pct(s.payout)}${s.stats ? ` · p(edge) ${s.stats.pValue.toFixed(2)}` : ""}`} />
+        {isMt5 ? (
+          <Card label="Avg per trade" value={s.n ? money(s.pnl / s.n) : "—"} sub="USD, after spread and fees" tone={s.n ? (s.pnl >= 0 ? "good" : "bad") : undefined} />
+        ) : (
+          <Card label="Break-even" value={pct(1 / (1 + s.payout))} sub={`payout ${pct(s.payout)}${s.stats ? ` · p(edge) ${s.stats.pValue.toFixed(2)}` : ""}`} />
+        )}
       </section>
 
       <section className="rounded-xl border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">

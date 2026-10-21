@@ -79,3 +79,19 @@ and a database outage never stops the bot; `trades.csv` stays the primary log).
 Shows live status (running / limit / stopped / offline), today and all-time P&L, win rate with 95% CI, break-even,
 p(edge) and a plain-English verdict, equity curve, recent trades and events. Tabs switch paper / demo / real.
 `cd dashboard && npm test` checks the stats against the same formulas as `backtest.py`.
+
+## MT5 account (Deriv CFDs | Standard, Windows)
+The options bot cannot trade an MT5 account. `mt5_bot.py` drives the MT5 **desktop** app (installed, logged in, symbols visible in Market Watch)
+through the `MetaTrader5` Python package. Run these in order:
+```
+run.bat mt5scan       :: ranks symbols by spread; shows what a stop would risk at the minimum lot. Places nothing.
+run.bat mt5check      :: connects, builds the next order, validates it with MT5's order_check. Places nothing.
+run.bat mt5backtest   :: strategy on your terminal's history, in R, with CI and a 1st/2nd-half split.
+run.bat mt5           :: signals only, no orders.
+run.bat mt5live       :: places orders after you type PLACE ORDERS (enabled for that window only).
+```
+Safeguards in code: stop-loss and take-profit on every order (set at the broker), lot rounded down so risk <= `MT5_RISK_USD` (0.50),
+no trade if even the minimum lot risks more, one position at a time, daily loss cap `MT5_DAILY_LOSS_USD` (1.00), equity floor
+`MT5_EQUITY_FLOOR` (5.00, halts), max 6 trades/day, spread filter, `STOP` file, halt after 3 failed orders.
+`MT5_SYMBOL=auto` picks the lowest-spread symbol that fits the risk limit. Untested against a live MT5 terminal: validate with
+`mt5check` first. Trades appear on the dashboard under the `mt5` tab.
