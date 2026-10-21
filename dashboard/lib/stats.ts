@@ -28,6 +28,7 @@ export function winStats(wins: number, n: number, payout: number) {
 
 export type Trade = { ts: Date; direction: string; stake: number; profit: number; payout_ratio: number | null };
 
+
 export function summarize(trades: Trade[]) {
   const n = trades.length;
   const wins = trades.filter((t) => t.profit > 0).length;
@@ -48,4 +49,36 @@ export function verdict(s: ReturnType<typeof summarize>) {
   if (!s.stats || s.n < 100) return { tone: "neutral" as const, text: `Only ${s.n} trades. Too few to tell skill from luck (aim for hundreds).` };
   if (s.stats.pValue < 0.05 && s.pnl > 0) return { tone: "good" as const, text: "Win rate is above break-even with statistical support. Verify out of sample before trusting it." };
   return { tone: "bad" as const, text: "No evidence of an edge: the win rate is not distinguishable from break-even or is below it." };
+}
+
+// ---- R-multiple view for the MT5 bot: the stake column holds the planned risk, so R = profit / stake.
+export function rStats(trades: Trade[]) {
+  const rs = trades.filter((t) => t.stake > 0).map((t) => t.profit / t.stake);
+  const part = (xs: number[]) => {
+    const n = xs.length;
+    if (n < 2) return { n, mean: n ? xs[0] : 0, lo: 0, hi: 0, p: 1 };
+    const mean = xs.reduce((a, b) => a + b, 0) / n;
+    const se = Math.sqrt(xs.reduce((a, x) => a + (x - mean) ** 2, 0) / (n - 1)) / Math.sqrt(n);
+    return { n, mean, lo: mean - 1.96 * se, hi: mean + 1.96 * se, p: se ? normalUpperTail(mean / se) : 1 };
+  };
+  const mid = Math.floor(rs.length / 2);
+  return { all: part(rs), first: part(rs.slice(0, mid)), second: part(rs.slice(mid)) };
+}
+
+// Same gate as lab.py: 300+ trades and a 95% interval above zero in BOTH halves.
+export function rVerdict(r: ReturnType<typeof rStats>) {
+  if (r.all.n < 300) return { tone: "neutral" as const, label: "Too few trades", text: `${r.all.n} of 300 trades needed before any verdict is meaningful.` };
+  if (r.first.lo > 0 && r.second.lo > 0) return { tone: "good" as const, label: "Pass", text: "Positive with statistical support in both halves. Keep watching forward results." };
+  if (r.first.mean > 0 && r.second.mean > 0) return { tone: "neutral" as const, label: "Promising", text: "Positive in both halves but not yet statistically solid." };
+  return { tone: "bad" as const, label: "Fail", text: "No evidence of an edge: average R is not reliably above zero in both halves." };
+}
+
+// P&L per UTC day, oldest first, last `days` days that had trades.
+export function dailyPnl(trades: Trade[], days = 14) {
+  const by = new Map<string, number>();
+  for (const t of trades) {
+    const d = new Date(t.ts).toISOString().slice(0, 10);
+    by.set(d, (by.get(d) ?? 0) + t.profit);
+  }
+  return [...by.entries()].sort((a, b) => a[0].localeCompare(b[0])).slice(-days).map(([day, pnl]) => ({ day, pnl }));
 }

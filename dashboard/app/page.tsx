@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { getSql } from "@/lib/db";
-import { summarize, verdict, type Trade } from "@/lib/stats";
+import { summarize, verdict, rStats, rVerdict, dailyPnl, type Trade } from "@/lib/stats";
 import Refresh from "./refresh";
 
 export const dynamic = "force-dynamic";
@@ -47,13 +47,36 @@ function Curve({ points }: { points: number[] }) {
   );
 }
 
+function DailyBars({ data }: { data: { day: string; pnl: number }[] }) {
+  if (data.length === 0) return <div className="grid h-24 place-items-center text-sm text-zinc-500">No trades yet.</div>;
+  const w = 800, h = 120, pad = 6;
+  const peak = Math.max(...data.map((d) => Math.abs(d.pnl)), 0.01);
+  const bw = Math.min(40, (w - 2 * pad) / data.length - 6);
+  const mid = h / 2;
+  return (
+    <svg viewBox={`0 0 ${w} ${h + 16}`} className="h-32 w-full" role="img" aria-label="Profit and loss per day">
+      <line x1={pad} x2={w - pad} y1={mid} y2={mid} className="stroke-zinc-300 dark:stroke-zinc-700" />
+      {data.map((d, i) => {
+        const x = pad + (i + 0.5) * ((w - 2 * pad) / data.length) - bw / 2;
+        const hh = (Math.abs(d.pnl) / peak) * (mid - pad);
+        return (
+          <g key={d.day}>
+            <rect x={x} y={d.pnl >= 0 ? mid - hh : mid} width={bw} height={Math.max(hh, 1)} rx="2" className={d.pnl >= 0 ? "fill-emerald-500" : "fill-rose-500"} />
+            <text x={x + bw / 2} y={h + 12} textAnchor="middle" className="fill-zinc-500 text-[10px]">{d.day.slice(5)}</text>
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
 export default async function Home({ searchParams }: { searchParams: Promise<{ mode?: string }> }) {
   const { mode: asked } = await searchParams;
   let data;
   try {
     const sql = getSql();
     const statuses = await sql<Status[]>`select * from bot_status order by mode`;
-    const mode = MODES.includes(asked ?? "") ? asked! : statuses.find((s) => s.mode === "demo")?.mode ?? statuses[0]?.mode ?? "demo";
+    const mode = MODES.includes(asked ?? "") ? asked! : [...statuses].sort((a, b) => +new Date(b.last_seen) - +new Date(a.last_seen))[0]?.mode ?? "demo";
     const rows = await sql<Row[]>`select ts, mode, symbol, direction, stake, profit, day_pnl, payout_ratio from trades where mode = ${mode} order by ts asc limit 50000`;
     const events = await sql<Event[]>`select ts, mode, level, text from events where mode = ${mode} order by ts desc limit 15`;
     data = { statuses, mode, rows, events };
@@ -71,14 +94,11 @@ export default async function Home({ searchParams }: { searchParams: Promise<{ m
   const { statuses, mode, rows, events } = data;
   const trades: Trade[] = rows.map((r) => ({ ts: r.ts, direction: r.direction, stake: Number(r.stake), profit: Number(r.profit), payout_ratio: r.payout_ratio == null ? null : Number(r.payout_ratio) }));
   const s = summarize(trades);
-  const isMt5 = mode === "mt5";               // MT5 rows have no fixed payout: judge by average USD per trade
-  const v = isMt5
-    ? s.n < 100
-      ? { tone: "neutral" as const, text: `Only ${s.n} trades. Too few to tell skill from luck (aim for hundreds).` }
-      : s.pnl > 0
-        ? { tone: "neutral" as const, text: "Positive so far. Check it holds out of sample before trusting it." }
-        : { tone: "bad" as const, text: "Losing so far: average result per trade is not positive." }
-    : verdict(s);
+  const isMt5 = mode === "mt5";               // MT5 rows have no fixed payout: judge in R (profit / planned risk)
+  const rs = isMt5 ? rStats(trades) : null;
+  const rv = rs ? rVerdict(rs) : null;
+  const v = rv ? { tone: rv.tone, text: `${rv.label}: ${rv.text}` } : verdict(s);
+  const daily = dailyPnl(trades, 14);
   const st = statuses.find((x) => x.mode === mode);
   const stale = st ? Date.now() - new Date(st.last_seen).getTime() > 90_000 : true;
   const state = !st ? "no data yet" : stale ? "offline" : st.status;
@@ -109,16 +129,26 @@ export default async function Home({ searchParams }: { searchParams: Promise<{ m
         </nav>
       </header>
 
+      {state === "offline" && st && (
+        <div className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200">
+          Bot not reporting since {ago(st.last_seen)}.{events[0] ? ` Last event: ${events[0].text}` : ""} Check the CMD window on your PC.
+        </div>
+      )}
       <div className={`rounded-xl border p-3 text-sm ${vtone}`}>{v.text}</div>
 
       <section className="grid grid-cols-2 gap-3 md:grid-cols-4">
-        <Card label="Today" value={st ? money(Number(st.day_pnl)) : "—"} sub={st ? `${st.trades_today} trades` : undefined} tone={st ? (Number(st.day_pnl) >= 0 ? "good" : "bad") : undefined} />
+        <Card label="Today" value={st ? money(Number(st.day_pnl)) : "—"} sub={st ? `${st.trades_today} trade${st.trades_today === 1 ? "" : "s"}` : undefined} tone={st ? (Number(st.day_pnl) >= 0 ? "good" : "bad") : undefined} />
         <Card label="All-time P&L" value={money(s.pnl)} sub={`${s.n} trades${s.n ? `, ${money(s.pnl / s.n)} each` : ""}`} tone={s.pnl >= 0 ? "good" : "bad"} />
-        <Card label="Win rate" value={s.stats ? pct(s.stats.rate) : "—"} sub={s.stats ? `95% CI ${pct(s.stats.lo)}–${pct(s.stats.hi)}` : undefined} />
-        {isMt5 ? (
-          <Card label="Avg per trade" value={s.n ? money(s.pnl / s.n) : "—"} sub="USD, after spread and fees" tone={s.n ? (s.pnl >= 0 ? "good" : "bad") : undefined} />
+        {rs ? (
+          <>
+            <Card label="Avg R per trade" value={`${rs.all.mean >= 0 ? "+" : ""}${rs.all.mean.toFixed(3)}R`} sub={`95% CI ${rs.all.lo.toFixed(3)} to ${rs.all.hi.toFixed(3)}`} tone={rs.all.n ? (rs.all.mean >= 0 ? "good" : "bad") : undefined} />
+            <Card label="Gate (300 trades)" value={`${rs.all.n} / 300`} sub={`1st half ${rs.first.mean.toFixed(3)}R · 2nd half ${rs.second.mean.toFixed(3)}R`} />
+          </>
         ) : (
-          <Card label="Break-even" value={pct(1 / (1 + s.payout))} sub={`payout ${pct(s.payout)}${s.stats ? ` · p(edge) ${s.stats.pValue.toFixed(2)}` : ""}`} />
+          <>
+            <Card label="Win rate" value={s.stats ? pct(s.stats.rate) : "—"} sub={s.stats ? `95% CI ${pct(s.stats.lo)}–${pct(s.stats.hi)}` : undefined} />
+            <Card label="Break-even" value={pct(1 / (1 + s.payout))} sub={`payout ${pct(s.payout)}${s.stats ? ` · p(edge) ${s.stats.pValue.toFixed(2)}` : ""}`} />
+          </>
         )}
       </section>
 
@@ -128,6 +158,11 @@ export default async function Home({ searchParams }: { searchParams: Promise<{ m
           <span className="text-xs text-zinc-500">max drawdown {s.maxDd.toFixed(2)}</span>
         </div>
         <Curve points={s.curve} />
+      </section>
+
+      <section className="rounded-xl border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+        <h2 className="mb-2 text-sm font-medium">Profit and loss per day (UTC)</h2>
+        <DailyBars data={daily} />
       </section>
 
       <div className="grid gap-6 md:grid-cols-5">
