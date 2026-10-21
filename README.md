@@ -95,3 +95,17 @@ no trade if even the minimum lot risks more, one position at a time, daily loss 
 `MT5_EQUITY_FLOOR` (5.00, halts), max 6 trades/day, spread filter, `STOP` file, halt after 3 failed orders.
 `MT5_SYMBOL=auto` picks the lowest-spread symbol that fits the risk limit. Untested against a live MT5 terminal: validate with
 `mt5check` first. Trades appear on the dashboard under the `mt5` tab.
+
+## Strategy lab (no money, no MT5 needed)
+Tests ideas on ~4 months of real forex candles from Deriv's public feed (cached as `candles_<symbol>_<seconds>.csv`).
+```
+run.bat lab compare                         :: all strategies on USDJPY M5 (default)
+run.bat lab compare --session 12-17         :: only UTC 12:00-17:00 (London/NY overlap)
+run.bat lab compare --trend 200             :: only trade with the 200-bar average
+run.bat lab sweep sma_cross                 :: tune on the 1st half, judge on the 2nd (honest) half
+run.bat lab compare --symbol frxEURUSD --tf 900
+```
+Strategies: `sma_cross`, `rsi_revert`, `bb_revert`, `donchian`, `trend_pullback`. Entry is the open of the bar AFTER the signal,
+the spread is charged as a share of the stop (`--spread-pct`, 0.009 = your USDJPY), both-hit-in-one-bar counts as a loss.
+Verdict: PASS needs 300+ trades and a 95% interval above zero in BOTH halves; PROMISING = positive in both halves but not
+significant yet; `random>=` shows how often random entries with the same exits beat the strategy. Tests: `python -m unittest`.
