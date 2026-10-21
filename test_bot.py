@@ -180,3 +180,21 @@ class SettleTests(Isolated):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(os.getenv("TEST_DATABASE_URL"), "set TEST_DATABASE_URL to a scratch Postgres to run")
+class DbTests(unittest.TestCase):
+    def test_roundtrip_and_never_raises(self):
+        import db, psycopg
+        db.DB_URL, db._ready = os.environ["TEST_DATABASE_URL"], False
+        db.insert_trade("test", "R_100", "CALL", 1, 0.92, 0.92, 1.0, 0.92, 42)
+        db.event("test", "info", "hello")
+        db.heartbeat("test", "R_100", 0.92, 1, "running")
+        db.heartbeat("test", "R_100", 1.5, 2, "limit")      # upsert, not a second row
+        with psycopg.connect(db.DB_URL) as c:
+            self.assertEqual(c.execute("select count(*) from trades where mode='test'").fetchone()[0], 1)
+            self.assertEqual(c.execute("select trades_today, status from bot_status where mode='test'").fetchone(), (2, "limit"))
+            for t in ("trades", "events", "bot_status"):
+                c.execute(f"delete from {t} where mode='test'")
+        db.DB_URL = "postgresql://nobody@127.0.0.1:1/none"   # unreachable: must swallow the error
+        db.insert_trade("test", "R_100", "CALL", 1, 0, 0)

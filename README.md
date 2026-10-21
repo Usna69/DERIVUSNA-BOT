@@ -62,3 +62,36 @@ lost on the second half (46% vs 52% needed). That is overfitting, not an edge. J
 - Create a file named `STOP` in the folder to halt new trades; delete it to resume.
 - No message for `STALE_S` (30) seconds = dead feed, the bot reconnects. Disconnect alerts include Deriv's close code.
 - A locked `trades.csv` (open in Excel) no longer breaks a trade; the row is printed instead.
+
+## Dashboard (Postgres + Next.js on Vercel)
+```
+bot (your PC) --writes--> Postgres (Neon/Supabase) <--reads-- dashboard/ (Vercel)
+```
+The bot logs trades, events and a 30s heartbeat to Postgres when `DATABASE_URL` is set (unset = no change in behaviour,
+and a database outage never stops the bot; `trades.csv` stays the primary log).
+
+1. Create a free Postgres at neon.tech (or Supabase). Copy the connection string. Treat it like a password.
+2. Bot: `pip install -r requirements.txt`, then in CMD `set DATABASE_URL=...` before `run.bat demo`. Tables are created automatically.
+3. Dashboard: import the repo in Vercel, set **Root Directory = `dashboard`**, add env vars `DATABASE_URL` (same string)
+   and `DASHBOARD_PASSWORD`. The site asks for a login (any username) and refuses to load without a password.
+4. Local try-out: `cd dashboard && npm install && npm run dev` with a `.env.local` copied from `.env.example`.
+
+Shows live status (running / limit / stopped / offline), today and all-time P&L, win rate with 95% CI, break-even,
+p(edge) and a plain-English verdict, equity curve, recent trades and events. Tabs switch paper / demo / real.
+`cd dashboard && npm test` checks the stats against the same formulas as `backtest.py`.
+
+## MT5 account (Deriv CFDs | Standard, Windows)
+The options bot cannot trade an MT5 account. `mt5_bot.py` drives the MT5 **desktop** app (installed, logged in, symbols visible in Market Watch)
+through the `MetaTrader5` Python package. Run these in order:
+```
+run.bat mt5scan       :: ranks symbols by spread; shows what a stop would risk at the minimum lot. Places nothing.
+run.bat mt5check      :: connects, builds the next order, validates it with MT5's order_check. Places nothing.
+run.bat mt5backtest   :: strategy on your terminal's history, in R, with CI and a 1st/2nd-half split.
+run.bat mt5           :: signals only, no orders.
+run.bat mt5live       :: places orders after you type PLACE ORDERS (enabled for that window only).
+```
+Safeguards in code: stop-loss and take-profit on every order (set at the broker), lot rounded down so risk <= `MT5_RISK_USD` (0.50),
+no trade if even the minimum lot risks more, one position at a time, daily loss cap `MT5_DAILY_LOSS_USD` (1.00), equity floor
+`MT5_EQUITY_FLOOR` (5.00, halts), max 6 trades/day, spread filter, `STOP` file, halt after 3 failed orders.
+`MT5_SYMBOL=auto` picks the lowest-spread symbol that fits the risk limit. Untested against a live MT5 terminal: validate with
+`mt5check` first. Trades appear on the dashboard under the `mt5` tab.
