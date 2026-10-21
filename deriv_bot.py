@@ -34,7 +34,10 @@ STAKE = float(os.getenv("STAKE", "1"))              # fixed, never increased aft
 DURATION_TICKS = int(os.getenv("DURATION_TICKS", "5"))
 FAST = int(os.getenv("FAST", "10"))                 # SMA lengths in ticks
 SLOW = int(os.getenv("SLOW", "30"))
-COOLDOWN_S = int(os.getenv("COOLDOWN_S", "30"))                                    # min seconds between trades
+COOLDOWN_S = int(os.getenv("COOLDOWN_S", "30"))     # min seconds between trades
+STALE_S = int(os.getenv("STALE_S", "30"))           # no message for this long = dead feed, reconnect
+STATE_FILE = f"state_{MODE}.json"                   # survives crashes/restarts: day P&L, trade count, open contracts
+STOP_FILE = "STOP"                                  # create this file to halt new trades
 MAX_TRADES_PER_DAY = int(os.getenv("MAX_TRADES", "20"))
 MAX_DAILY_LOSS = float(os.getenv("MAX_DAILY_LOSS", "5"))   # stop for the day at this loss
 PAPER_PAYOUT = 0.95                                 # assumed payout ratio in paper mode
@@ -69,18 +72,44 @@ def sma(xs, n):
     return sum(list(xs)[-n:]) / n
 
 
-def signal(ticks):
-    """CALL on a fast-over-slow SMA cross, PUT on the reverse, else None. Needs SLOW+1 ticks."""
+def signal(ticks, fast=None, slow=None):
+    """CALL on a fast-over-slow SMA cross, PUT on the reverse, else None. Needs slow+1 ticks."""
+    fast, slow = fast or FAST, slow or SLOW
     t = list(ticks)
-    if len(t) < SLOW + 1:
+    if len(t) < slow + 1:
         return None
     prev = t[:-1]
-    f0, s0, f1, s1 = sma(prev, FAST), sma(prev, SLOW), sma(t, FAST), sma(t, SLOW)
+    f0, s0, f1, s1 = sma(prev, fast), sma(prev, slow), sma(t, fast), sma(t, slow)
     return "CALL" if (f0 <= s0 and f1 > s1) else "PUT" if (f0 >= s0 and f1 < s1) else None
 
 
 class ApiError(RuntimeError):
     pass
+
+
+def save_state(bot):
+    """Atomic write so a crash mid-save cannot corrupt the file."""
+    data = {"pnl": bot.pnl, "trades": bot.trades, "last_trade": bot.last_trade, "day": bot.day,
+            "open_contracts": {str(k): list(v) for k, v in bot.open_contracts.items()}}
+    try:
+        with open(STATE_FILE + ".tmp", "w") as f:
+            json.dump(data, f)
+        os.replace(STATE_FILE + ".tmp", STATE_FILE)
+    except OSError as e:
+        print("could not save state:", e)
+
+
+def load_state():
+    """Restore counters (only for today) and any contracts left open. Returns {} if none."""
+    try:
+        with open(STATE_FILE) as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    state = {"open_contracts": {int(k): tuple(v) for k, v in d.get("open_contracts", {}).items()}}
+    if d.get("day") == time.strftime("%Y-%m-%d"):
+        state.update({k: d[k] for k in ("pnl", "trades", "last_trade", "day") if k in d})
+    return state
 
 
 class Bot:
@@ -97,6 +126,7 @@ class Bot:
         self.busy = False
         self.day = time.strftime("%Y-%m-%d")
         self.limit_alerted = False
+        self.stop_alerted = False
         self.resumed = False                        # True after a reconnect, to skip the start alert
 
     async def call(self, payload):
@@ -111,7 +141,8 @@ class Bot:
         return res
 
     async def reader(self):
-        async for raw in self.ws:
+        while True:
+            raw = await asyncio.wait_for(self.ws.recv(), STALE_S)     # silent feed -> TimeoutError -> reconnect
             m = json.loads(raw)
             fut = self.pending.pop(m.get("req_id"), None)
             if fut and not fut.done():
@@ -120,21 +151,33 @@ class Bot:
                 await self.on_tick(float(m["tick"]["quote"]))
 
     def log(self, row):
-        if os.path.exists(LOG):                      # old column layout: keep it, start a fresh log
-            with open(LOG, newline="") as f:
-                if next(csv.reader(f), None) != HEADER:
-                    os.replace(LOG, f"trades_old_{int(time.time())}.csv")
-        new = not os.path.exists(LOG)
-        with open(LOG, "a", newline="") as f:
-            w = csv.writer(f)
-            if new:
-                w.writerow(HEADER)
-            w.writerow(row)
+        """Append to trades.csv. Never raises: a locked file (e.g. open in Excel) must not break a live trade."""
+        try:
+            if os.path.exists(LOG):                  # old column layout: keep it, start a fresh log
+                with open(LOG, newline="") as f:
+                    header = next(csv.reader(f), None)
+                if header != HEADER:                 # file closed before renaming; Windows cannot rename an open file
+                    os.replace(LOG, os.path.join(os.path.dirname(LOG), f"trades_old_{int(time.time())}.csv"))
+            new = not os.path.exists(LOG)
+            with open(LOG, "a", newline="") as f:
+                w = csv.writer(f)
+                if new:
+                    w.writerow(HEADER)
+                w.writerow(row)
+        except OSError as e:
+            print(f"could not write {LOG} ({e}); close it in Excel. Row: {row}")
 
     def allowed(self):
         today = time.strftime("%Y-%m-%d")
         if today != self.day:                        # new day: reset limits
             self.day, self.pnl, self.trades, self.limit_alerted = today, 0.0, 0, False
+            save_state(self)
+        if os.path.exists(STOP_FILE):
+            if not self.stop_alerted:
+                self.stop_alerted = True
+                alert("STOP file found: no new trades until it is deleted.")
+            return False
+        self.stop_alerted = False
         if self.pnl <= -MAX_DAILY_LOSS or self.trades >= MAX_TRADES_PER_DAY:
             if not self.limit_alerted:
                 self.limit_alerted = True
@@ -154,6 +197,7 @@ class Bot:
                 profit = STAKE * PAPER_PAYOUT if win else -STAKE
                 self.pnl += profit
                 self.log([time.strftime("%H:%M:%S"), MODE, SYMBOL, d, STAKE, round(profit, 2), round(self.pnl, 2), "", PAPER_PAYOUT])
+                save_state(self)
                 alert(f"paper {d} {'WIN' if win else 'LOSS'} {profit:+.2f}, day {self.pnl:+.2f}")
                 self.open_paper = None
             return
@@ -164,6 +208,7 @@ class Bot:
             return
         self.trades += 1
         self.last_trade = time.time()
+        save_state(self)
         if MODE == "paper":
             self.open_paper = (direction, price, DURATION_TICKS)
             print(f"paper {direction} at {price}")
@@ -183,6 +228,7 @@ class Bot:
             cid = b["buy"]["contract_id"]
             print(f"{MODE} {direction} bought, contract {cid}, ask {ask}, payout {ratio:.1%}")
             self.open_contracts[cid] = (direction, ask, ratio)
+            save_state(self)
             await self.settle(cid)
         except Exception as e:
             alert(f"trade error: {e}")
@@ -202,6 +248,7 @@ class Bot:
                 profit = float(c["profit"])
                 self.pnl += profit
                 self.log([time.strftime("%H:%M:%S"), MODE, SYMBOL, direction, STAKE, profit, round(self.pnl, 2), ask, ratio])
+                save_state(self)
                 alert(f"{direction} {'WIN' if profit > 0 else 'LOSS'} {profit:+.2f}, day {self.pnl:+.2f}")
                 return
 
@@ -249,7 +296,11 @@ def trading_url():
 
 async def main():
     wait = 2
-    state = {}
+    state = load_state()                            # empty on first run; restores today's P&L after a restart
+    if state.get("pnl") or state.get("open_contracts"):
+        print(f"restored state: pnl {state.get('pnl', 0):+.2f}, trades {state.get('trades', 0)}, "
+              f"open contracts {len(state.get('open_contracts', {}))}")
+    reconnect = False
     while True:                                     # reconnect with backoff; fresh OTP each time
         try:
             if MODE == "paper":
@@ -260,8 +311,8 @@ async def main():
                 bot = Bot(ws, state.get("open_contracts"))
                 bot.__dict__.update({k: v for k, v in state.items() if k != "open_contracts"})
                 bot.currency = cur
-                bot.resumed = bool(state)
-                wait = 2
+                bot.resumed = reconnect
+                wait, reconnect = 2, True
                 try:
                     await bot.run()
                 finally:
@@ -275,7 +326,11 @@ async def main():
         except ApiError as e:
             raise SystemExit(f"Deriv API error: {e}")
         except (websockets.ConnectionClosed, OSError, asyncio.TimeoutError) as e:
-            alert(f"connection lost ({e.__class__.__name__}); retrying in {wait}s")
+            why = f"no data for {STALE_S}s" if isinstance(e, asyncio.TimeoutError) else e.__class__.__name__
+            frame = getattr(e, "rcvd", None) or getattr(e, "sent", None)
+            if frame is not None:                    # close code/reason from Deriv helps explain drops
+                why += f", code {frame.code} {frame.reason!r}"
+            alert(f"connection lost ({why}); retrying in {wait}s")
             await asyncio.sleep(wait)
             wait = min(wait * 2, 60)
 

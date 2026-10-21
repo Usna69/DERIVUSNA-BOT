@@ -46,3 +46,19 @@ You get alerts for start, each trade result, errors, disconnects and "daily limi
 `trades.csv` now records `ask_price` and `payout_ratio` per trade. `backtest.py` uses the mean real payout from
 demo/real rows when it exists (else `PAYOUT` env, else 95%). An old-layout `trades.csv` is kept as `trades_old_<time>.csv`.
 `FAST`, `SLOW` and `COOLDOWN_S` are now env settings.
+
+## Research tools
+```
+run.bat collect     :: leave running; saves every tick to ticks_R_100.csv (feed only keeps ~24h)
+run.bat backtest    :: win-rate CI + p-value vs break-even, randomness check
+run.bat sweep       :: walk-forward: tune on first half, judge on second half
+run.bat test        :: offline unit tests
+```
+On 24h of R_100: tick changes show no autocorrelation (random), and the best SMA setting on the first half
+lost on the second half (46% vs 52% needed). That is overfitting, not an edge. Judge only on out-of-sample data.
+
+## Safety
+- `state_<mode>.json` keeps the day's P&L, trade count and open contracts across crashes/restarts.
+- Create a file named `STOP` in the folder to halt new trades; delete it to resume.
+- No message for `STALE_S` (30) seconds = dead feed, the bot reconnects. Disconnect alerts include Deriv's close code.
+- A locked `trades.csv` (open in Excel) no longer breaks a trade; the row is printed instead.
