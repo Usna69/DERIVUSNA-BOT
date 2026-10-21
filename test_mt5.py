@@ -159,6 +159,15 @@ class MT5Tests(unittest.TestCase):
         self.assertEqual(r.state.open_contracts, {})
         self.assertIn("mt5", open(d.LOG).read())
 
+    def test_synthetic_indices_are_skipped_by_default(self):
+        self.fake.si.path, self.fake.si.name = "Derived\\Volatility Indices\\Volatility 75 Index", "Volatility 75 Index"
+        self.assertTrue(m.is_synthetic(self.fake.si))
+        self.assertEqual(m.scan(print_rows=False), [])
+        m.ALLOW_SYNTHETIC = True
+        self.addCleanup(setattr, m, "ALLOW_SYNTHETIC", False)
+        self.assertEqual(m.scan(print_rows=False), ["Volatility 75 Index"])
+        self.assertFalse(m.is_synthetic(NS(path="Forex\\Majors\\EURUSD", name="EURUSD")))
+
     def test_scan_rejects_big_notional_and_accepts_small(self):
         m.mt5 = FakeMT5([c * 800 for c in self.fake.closes])    # BTC-sized prices: 0.01 lot risks several USD
         self.assertEqual(m.scan(print_rows=False), [])

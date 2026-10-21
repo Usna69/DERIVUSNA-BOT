@@ -29,6 +29,7 @@ DAILY_LOSS_USD = float(os.getenv("MT5_DAILY_LOSS_USD", "1.0"))
 EQUITY_FLOOR = float(os.getenv("MT5_EQUITY_FLOOR", "5.0"))   # below this equity: stop for good
 MAX_TRADES = int(os.getenv("MT5_MAX_TRADES", "6"))
 MAX_SPREAD_FRAC = float(os.getenv("MT5_MAX_SPREAD_FRAC", "0.25"))   # spread must be <= this share of the stop distance
+ALLOW_SYNTHETIC = os.getenv("MT5_ALLOW_SYNTHETIC") == "1"   # Boom/Crash/Volatility/Step: random by design, no edge possible
 MAGIC = 20260101
 POLL_S = 5
 mt5 = None                                           # MetaTrader5 module, set by connect() (tests inject a fake)
@@ -44,7 +45,8 @@ def candidate_paths(appdata=None):
     root = os.path.join(appdata or os.getenv("APPDATA", ""), "MetaQuotes", "Terminal")
     out = []
     for f in glob.glob(os.path.join(root, "*", "origin.txt")):
-        raw = open(f, "rb").read()
+        with open(f, "rb") as fh:
+            raw = fh.read()
         text = raw.decode("utf-16" if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else "utf-8", errors="ignore").strip()
         exe = os.path.join(text, "terminal64.exe")
         if text and os.path.exists(exe) and exe not in out:
@@ -140,6 +142,11 @@ def bars(symbol, n):
     return rates
 
 
+def is_synthetic(si):
+    text = f"{getattr(si, 'path', '')} {getattr(si, 'name', '')}".lower()
+    return any(w in text for w in ("derived", "synthetic", "volatility", "boom", "crash", "step ", "jump", "range break", "dex "))
+
+
 def symbol_view(symbol):
     """(si, tick, atr, closes) for one symbol, or None if unusable."""
     if not mt5.symbol_select(symbol, True):
@@ -156,7 +163,7 @@ def scan(print_rows=True):
     """Rank every crypto symbol in Market Watch. Returns feasible symbols best-first."""
     out = []
     for s in mt5.symbols_get() or []:
-        if not (s.visible and s.trade_mode == 4):
+        if not (s.visible and s.trade_mode == 4) or (is_synthetic(s) and not ALLOW_SYNTHETIC):
             continue
         v = symbol_view(s.name)
         if not v:
@@ -330,6 +337,11 @@ def main(argv):
         scan()
         return
     symbol = SYMBOL
+    if symbol != "auto":
+        si = mt5.symbol_info(symbol)
+        if si is not None and is_synthetic(si) and not ALLOW_SYNTHETIC:
+            raise SystemExit(f"{symbol} is a synthetic index: a random-number product with no exploitable pattern, so this "
+                             "strategy cannot have an edge there. Set MT5_ALLOW_SYNTHETIC=1 only if you accept that.")
     if symbol == "auto":
         ranked = scan(print_rows=False)
         if not ranked:
