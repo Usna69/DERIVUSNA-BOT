@@ -285,7 +285,43 @@ class Runner:
         return "opened"
 
 
+def diag():
+    """Print everything that decides whether Python can attach to MT5. Places nothing, shows no secrets."""
+    import platform, struct, subprocess
+    print(f"python {platform.python_version()} {struct.calcsize('P') * 8}-bit on {platform.system()} {platform.release()}")
+    try:
+        import ctypes
+        print("this CMD is administrator:", bool(ctypes.windll.shell32.IsUserAnAdmin()))
+    except Exception:                                # noqa: BLE001 - non-Windows
+        pass
+    try:
+        import MetaTrader5 as lib
+    except ImportError:
+        raise SystemExit("MetaTrader5 package missing: pip install MetaTrader5")
+    print("MetaTrader5 package", getattr(lib, "__version__", "?"), "| author", getattr(lib, "__author__", "?"))
+    try:
+        out = subprocess.run(["tasklist", "/fi", "imagename eq terminal64.exe", "/v"], capture_output=True, text=True).stdout
+        print("running terminal64 processes:\n" + (out.strip() or "(none)"))
+    except Exception as e:                           # noqa: BLE001
+        print("tasklist failed:", e)
+    paths = ([os.environ["MT5_PATH"]] if os.getenv("MT5_PATH") else []) + candidate_paths()
+    print("install paths found:", paths or "NONE (no origin.txt under %APPDATA%\\MetaQuotes\\Terminal)")
+    for p in [None] + paths:
+        lib.shutdown()
+        ok = lib.initialize(path=p, timeout=20000) if p else lib.initialize(timeout=20000)
+        print(f"initialize({p or 'default'}) -> {ok}  last_error={lib.last_error()}")
+        if ok:
+            ti, ai = lib.terminal_info(), lib.account_info()
+            print("  terminal:", getattr(ti, "name", "?"), "build", getattr(ti, "build", "?"), "| connected:", getattr(ti, "connected", "?"),
+                  "| trade_allowed:", getattr(ti, "trade_allowed", "?"))
+            print("  account:", getattr(ai, "login", None), getattr(ai, "server", None), "balance", getattr(ai, "balance", None))
+            break
+    lib.shutdown()
+
+
 def main(argv):
+    if len(argv) > 1 and argv[1] == "diag":
+        return diag()
     cmd = argv[1] if len(argv) > 1 else "check"
     acc = connect()
     real = is_real(acc)

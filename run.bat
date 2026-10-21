@@ -1,10 +1,11 @@
 @echo off
-:: Usage: run.bat paper | backtest | sweep | collect | test | demo | mt5scan | mt5check | mt5backtest | mt5 | mt5live
+:: Usage: run.bat paper | backtest | sweep | collect | test | demo | mt5diag | mt5scan | mt5check | mt5backtest | mt5 | mt5live
 call .venv\Scripts\activate || (echo Run setup.bat first. & exit /b 1)
 if "%1"=="backtest" python backtest.py & exit /b
 if "%1"=="sweep" set SWEEP=1& python backtest.py & exit /b
 if "%1"=="collect" python collect.py & exit /b
 if "%1"=="test" python -m unittest -v & exit /b
+if "%1"=="mt5diag" python mt5_bot.py diag & exit /b
 if "%1"=="mt5scan" python mt5_bot.py scan & exit /b
 if "%1"=="mt5check" python mt5_bot.py check & exit /b
 if "%1"=="mt5backtest" python mt5_backtest.py & exit /b
