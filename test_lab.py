@@ -170,6 +170,39 @@ class EvaluateTests(unittest.TestCase):
         self.assertEqual(row["tf_seconds"], 300)
 
 
+class BatchTests(unittest.TestCase):
+    def test_default_spreads(self):
+        self.assertEqual(lab.default_spread("frxUSDJPY"), 0.009)          # measured on the user's account
+        self.assertEqual(lab.default_spread("frxEURGBP"), lab.DEFAULT_SPREAD)
+        self.assertGreater(lab.default_spread("frxXPDUSD"), lab.default_spread("frxXAUUSD"))
+
+    def test_batch_runs_every_pair_and_timeframe_and_survives_a_failure(self):
+        calls = []
+        orig = lab.cmd_compare
+        def fake(a):
+            calls.append((a.symbol, a.tf, a.spread_pct, a.fast))
+            if a.symbol == "frxBAD":
+                raise SystemExit("no data")
+        lab.cmd_compare = fake
+        try:
+            lab.main(["batch", "--symbols", "frxUSDJPY,frxBAD", "--tfs", "300,900"])
+        finally:
+            lab.cmd_compare = orig
+        self.assertEqual([c[:2] for c in calls], [("frxUSDJPY", 300), ("frxUSDJPY", 900), ("frxBAD", 300), ("frxBAD", 900)])
+        self.assertTrue(all(c[3] for c in calls))                          # batch always skips the slow baseline
+        self.assertEqual(calls[0][2], 0.009)
+
+    def test_an_explicit_spread_overrides_the_default(self):
+        calls = []
+        orig = lab.cmd_compare
+        lab.cmd_compare = lambda a: calls.append(a.spread_pct)
+        try:
+            lab.main(["batch", "--symbols", "frxUSDJPY", "--tfs", "300", "--spread-pct", "0.05"])
+        finally:
+            lab.cmd_compare = orig
+        self.assertEqual(calls, [0.05])
+
+
 class StallTests(unittest.TestCase):
     def test_trickle_of_one_candle_counts_as_a_stall(self):
         s = 0

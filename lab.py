@@ -13,6 +13,16 @@ baseline shows how often luck alone beats the strategy.
 import argparse, asyncio, math, random, time
 
 SPREAD_PCT = 0.009          # USDJPY on your account (scan: 0.009% of price); override with --spread-pct
+SPREADS = {"frxUSDJPY": 0.009, "frxEURUSD": 0.010, "frxGBPUSD": 0.007, "cryBTCUSD": 0.022, "cryETHUSD": 0.05,
+           "frxXAUUSD": 0.03, "frxXAGUSD": 0.08, "frxXPDUSD": 0.15, "frxXPTUSD": 0.15, "frxUSDMXN": 0.06, "frxUSDPLN": 0.06}
+DEFAULT_SPREAD = 0.012      # assumed for any other pair; check real spreads with run.bat mt5scan before trusting a result
+BATCH_SYMBOLS = "frxUSDJPY,frxEURUSD,frxGBPUSD"
+BATCH_TFS = "300,900,3600"
+
+
+def default_spread(symbol):
+    """Spread (% of price) assumed for a symbol. Your own scan numbers for USDJPY/EURUSD/GBPUSD, estimates for the rest."""
+    return SPREADS.get(symbol, DEFAULT_SPREAD)
 MAX_HOLD = 200
 
 
@@ -312,6 +322,28 @@ def cmd_compare(args):
         print(f"published {db.lab_publish(rows)} results to the dashboard's Lab page")
 
 
+def cmd_batch(args):
+    """Run compare for several symbols and timeframes in one go (add --publish to fill the dashboard's Lab page)."""
+    import copy
+    symbols = [x.strip() for x in (args.symbols or BATCH_SYMBOLS).split(",") if x.strip()]
+    tfs = [int(x) for x in (args.tfs or BATCH_TFS).split(",") if x.strip()]
+    done, failed = 0, []
+    for sym in symbols:
+        for tf in tfs:
+            a = copy.copy(args)
+            a.symbol, a.tf, a.fast = sym, tf, True
+            if args.spread_pct is None:
+                a.spread_pct = default_spread(sym)
+            print(f"\n=== {sym} {tf}s ===")
+            try:
+                cmd_compare(a)
+                done += 1
+            except (SystemExit, Exception) as e:            # noqa: BLE001 - one bad pair must not stop the batch
+                failed.append(f"{sym} {tf}s: {e}")
+                print(f"skipped: {e}")
+    print(f"\nbatch finished: {done} runs ok, {len(failed)} skipped" + ("".join(f"\n  {x}" for x in failed)))
+
+
 def cmd_sweep(args):
     if args.name not in STRATEGIES:
         raise SystemExit(f"unknown strategy; choose from {', '.join(STRATEGIES)}")
@@ -354,14 +386,16 @@ def parse_session(txt):
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("cmd", choices=["compare", "sweep", "fetch"])
+    p.add_argument("cmd", choices=["compare", "sweep", "fetch", "batch"])
     p.add_argument("name", nargs="?", default="sma_cross", help="strategy for sweep")
     p.add_argument("--symbol", default="frxUSDJPY")
     p.add_argument("--tf", type=int, default=300, help="candle size in seconds (300=M5, 900=M15, 3600=H1)")
     p.add_argument("--bars", type=int, default=60000)
     p.add_argument("--sl-atr", type=float, default=1.5)
     p.add_argument("--rr", type=float, default=1.5)
-    p.add_argument("--spread-pct", type=float, default=SPREAD_PCT)
+    p.add_argument("--spread-pct", type=float, default=None, help="spread as %% of price; default is per symbol (see SPREADS in lab.py)")
+    p.add_argument("--symbols", default=None, help="batch: comma list, default " + BATCH_SYMBOLS)
+    p.add_argument("--tfs", default=None, help="batch: comma list of candle seconds, default " + BATCH_TFS)
     p.add_argument("--stop-fill", choices=["level", "extreme"], default="level", help="extreme = book stop-outs at the candle's worst price (use on Boom/Crash)")
     p.add_argument("--publish", action="store_true", help="save results to the database (needs DATABASE_URL) for the dashboard's Lab page")
     p.add_argument("--fast", action="store_true", help="skip the random-entry baseline (much quicker)")
@@ -369,7 +403,9 @@ def main(argv=None):
     p.add_argument("--trend", type=int, default=0, help="only trade with the n-bar average, e.g. 200")
     args = p.parse_args(argv)
     args.session = parse_session(args.session)
-    {"compare": cmd_compare, "sweep": cmd_sweep, "fetch": cmd_fetch}[args.cmd](args)
+    if args.spread_pct is None and args.cmd != "batch":
+        args.spread_pct = default_spread(args.symbol)
+    {"compare": cmd_compare, "sweep": cmd_sweep, "fetch": cmd_fetch, "batch": cmd_batch}[args.cmd](args)
 
 
 if __name__ == "__main__":

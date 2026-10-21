@@ -149,3 +149,13 @@ next to the live average R. Restart the MT5 bot once after updating so it report
   server time. Signals outside the window are counted as `outside session` in the status line. `run.bat mt5check` ignores it.
 - **Open positions:** the bot syncs its open positions to the database every 30 s; the mt5 tab shows pair, side, lots, entry, stop, target and floating P&L.
   Run `run.bat dbinit` once after updating so the `positions` table exists (the dashboard just shows nothing until then).
+
+### One command to fill the Lab page
+```
+set "DATABASE_URL=<your Neon string>"
+run.bat dbinit
+run.bat lab batch --publish                                   :: USDJPY, EURUSD, GBPUSD at 5m, 15m and 1h (about 10-15 min)
+run.bat lab batch --symbols frxEURJPY,frxGBPJPY --tfs 900,3600 --publish
+```
+Spreads default per symbol (`SPREADS` in `lab.py`: measured for USDJPY/EURUSD/GBPUSD, an estimate of 0.012% for other pairs);
+override with `--spread-pct`. A symbol that fails to download is skipped and the batch carries on. Batches skip the slow random baseline.
