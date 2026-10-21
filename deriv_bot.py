@@ -19,7 +19,7 @@ Uses Deriv's current API (developers.deriv.com): public tick feed with no login;
 via a one-time-password WebSocket URL issued by the REST API.
 This is an experiment, not a money machine: most short-term traders lose.
 """
-import asyncio, csv, json, os, time, urllib.request
+import asyncio, csv, json, os, time, urllib.error, urllib.request
 from collections import deque
 import websockets
 
@@ -44,9 +44,24 @@ def sma(xs, n):
     return sum(list(xs)[-n:]) / n
 
 
+def signal(ticks):
+    """CALL on a fast-over-slow SMA cross, PUT on the reverse, else None. Needs SLOW+1 ticks."""
+    t = list(ticks)
+    if len(t) < SLOW + 1:
+        return None
+    prev = t[:-1]
+    f0, s0, f1, s1 = sma(prev, FAST), sma(prev, SLOW), sma(t, FAST), sma(t, SLOW)
+    return "CALL" if (f0 <= s0 and f1 > s1) else "PUT" if (f0 >= s0 and f1 < s1) else None
+
+
+class ApiError(RuntimeError):
+    pass
+
+
 class Bot:
-    def __init__(self, ws):
+    def __init__(self, ws, open_contracts=None):
         self.ws = ws
+        self.open_contracts = open_contracts if open_contracts is not None else {}   # cid -> direction
         self.req = 0
         self.pending = {}
         self.ticks = deque(maxlen=SLOW + 2)
@@ -65,7 +80,7 @@ class Bot:
         await self.ws.send(json.dumps(payload))
         res = await asyncio.wait_for(fut, 20)
         if res.get("error"):
-            raise RuntimeError(res["error"].get("message"))
+            raise ApiError(res["error"].get("message"))
         return res
 
     async def reader(self):
@@ -112,10 +127,7 @@ class Bot:
             return
         if len(self.ticks) < SLOW + 1 or self.busy or not self.allowed():
             return
-        prev = list(self.ticks)[:-1]
-        f0, s0 = sma(prev, FAST), sma(prev, SLOW)
-        f1, s1 = sma(self.ticks, FAST), sma(self.ticks, SLOW)
-        direction = "CALL" if (f0 <= s0 and f1 > s1) else "PUT" if (f0 >= s0 and f1 < s1) else None
+        direction = signal(self.ticks)
         if not direction:
             return
         self.trades += 1
@@ -136,23 +148,40 @@ class Bot:
             b = await self.call({"buy": prop["id"], "price": prop["ask_price"]})
             cid = b["buy"]["contract_id"]
             print(f"{MODE} {direction} bought, contract {cid}")
-            for _ in range(60):                      # poll until sold
-                await asyncio.sleep(2)
-                c = (await self.call({"proposal_open_contract": 1, "contract_id": cid}))["proposal_open_contract"]
-                if c.get("is_sold"):
-                    profit = float(c["profit"])
-                    self.pnl += profit
-                    self.log([time.strftime("%H:%M:%S"), MODE, SYMBOL, direction, STAKE, profit, round(self.pnl, 2)])
-                    print(f"{direction} {profit:+.2f}  day {self.pnl:+.2f}")
-                    break
+            self.open_contracts[cid] = direction
+            await self.settle(cid)
         except Exception as e:
             print("trade error:", e)
         finally:
             self.busy = False
 
+    async def settle(self, cid):
+        """Poll a contract until sold and book the profit once. Survives reconnects via open_contracts."""
+        for _ in range(60):
+            await asyncio.sleep(2)
+            c = (await self.call({"proposal_open_contract": 1, "contract_id": cid}))["proposal_open_contract"]
+            if c.get("is_sold"):
+                direction = self.open_contracts.pop(cid, None)
+                if direction is None:                # already booked
+                    return
+                profit = float(c["profit"])
+                self.pnl += profit
+                self.log([time.strftime("%H:%M:%S"), MODE, SYMBOL, direction, STAKE, profit, round(self.pnl, 2)])
+                print(f"{direction} {profit:+.2f}  day {self.pnl:+.2f}")
+                return
+
+    async def resume(self, cid):
+        try:
+            await self.settle(cid)
+        except Exception as e:
+            print("resume error:", e)
+
     async def run(self):
         reader = asyncio.create_task(self.reader())
         await self.call({"ticks": SYMBOL, "subscribe": 1})
+        for cid in list(self.open_contracts):        # contracts left open by a dropped connection
+            print(f"resuming contract {cid}")
+            asyncio.create_task(self.resume(cid))
         print(f"{MODE} mode on {SYMBOL}, stake {STAKE}, daily loss limit {MAX_DAILY_LOSS}. Ctrl+C to stop.")
         await reader
 
@@ -191,14 +220,22 @@ async def main():
             else:
                 url, cur = await asyncio.to_thread(trading_url)
             async with websockets.connect(url, ping_interval=25) as ws:
-                bot = Bot(ws)
-                bot.__dict__.update(state)           # keep pnl/trade counters across reconnects
+                bot = Bot(ws, state.get("open_contracts"))
+                bot.__dict__.update({k: v for k, v in state.items() if k != "open_contracts"})
                 bot.currency = cur
                 wait = 2
                 try:
                     await bot.run()
                 finally:
-                    state = {k: bot.__dict__[k] for k in ("pnl", "trades", "last_trade", "day")}
+                    state = {k: bot.__dict__[k] for k in ("pnl", "trades", "last_trade", "day", "open_contracts")}
+        except urllib.error.HTTPError as e:
+            if e.code in (400, 401, 403):            # bad token / app id / scope: retrying will not help
+                raise SystemExit(f"Deriv rejected the credentials (HTTP {e.code}). Check DERIV_TOKEN and DERIV_APP_ID.")
+            print(f"REST error {e.code}; retrying in {wait}s")
+            await asyncio.sleep(wait)
+            wait = min(wait * 2, 60)
+        except ApiError as e:
+            raise SystemExit(f"Deriv API error: {e}")
         except (websockets.ConnectionClosed, OSError, asyncio.TimeoutError) as e:
             print(f"connection lost ({e.__class__.__name__}); retrying in {wait}s")
             await asyncio.sleep(wait)

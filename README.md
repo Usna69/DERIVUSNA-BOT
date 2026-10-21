@@ -18,3 +18,10 @@ BOT_MODE=demo python deriv_bot.py
 `real` needs `BOT_MODE=real ALLOW_REAL=1`. Test on paper, then demo for weeks, before real.
 
 Settings (env): SYMBOL, STAKE, DURATION_TICKS, MAX_TRADES, MAX_DAILY_LOSS. Trades log to trades.csv.
+
+## Backtest
+```
+python backtest.py                      # last 24h of ticks (the feed's history limit)
+PAYOUT=0.95 python backtest.py
+```
+Replays the same SMA signal and limits on past ticks. Break-even win rate is 1/(1+payout), about 51.3% at 95%.
