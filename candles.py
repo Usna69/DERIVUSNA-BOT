@@ -38,6 +38,15 @@ def save(symbol, gran, rows, folder="."):
     os.replace(tmp, cache_path(symbol, gran, folder))
 
 
+MIN_NEW = 50                                          # a page adding fewer candles than this means we hit the feed's history limit
+
+
+def next_stalls(stalls, added, min_new=MIN_NEW):
+    """Count consecutive near-empty pages. Near the history limit the feed trickles 1 candle per page, so 'no new
+    candles' alone never fires and the download crawls forever."""
+    return stalls + 1 if added < min_new else 0
+
+
 async def _ask(ws, payload, retries=6):
     for attempt in range(retries):
         await ws.send(json.dumps(payload))
@@ -69,7 +78,7 @@ async def fetch(symbol, gran, bars, folder=".", verbose=True):
             before = len(rows)
             for c in res.get("candles", []):
                 rows[c["epoch"]] = (c["open"], c["high"], c["low"], c["close"])
-            stalls = stalls + 1 if len(rows) == before else 0
+            stalls = next_stalls(stalls, len(rows) - before)
             end = min(rows) - 1
             if verbose:
                 print(f"  {symbol} {gran}s: {len(rows)} candles")

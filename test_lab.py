@@ -135,6 +135,18 @@ class VerdictTests(unittest.TestCase):
         self.assertEqual(p, 0.0)                                         # +5R average is impossible by luck
 
 
+class StallTests(unittest.TestCase):
+    def test_trickle_of_one_candle_counts_as_a_stall(self):
+        s = 0
+        for _ in range(2):
+            s = candles.next_stalls(s, 1)
+        self.assertEqual(s, 2)                                   # stops the loop (limit is 2)
+
+    def test_a_healthy_page_resets_the_counter(self):
+        self.assertEqual(candles.next_stalls(1, 690), 0)
+        self.assertEqual(candles.next_stalls(0, 0), 1)
+
+
 class CandleCacheTests(unittest.TestCase):
     def test_roundtrip_and_ordering(self):
         with tempfile.TemporaryDirectory() as tmp:
