@@ -46,7 +46,7 @@ class FakeMT5:
         return NS(retcode=self.send_retcode, order=777, comment="fake")
 
 
-class MT5Tests(unittest.TestCase):
+class MT5Fixture(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.saved = (d.LOG, d.STATE_FILE, d.STOP_FILE, d.send_telegram, m.mt5)
@@ -61,6 +61,9 @@ class MT5Tests(unittest.TestCase):
         d.LOG, d.STATE_FILE, d.STOP_FILE, d.send_telegram, m.mt5 = self.saved
         self.tmp.cleanup()
 
+
+
+class MT5Tests(MT5Fixture):
     def runner(self, orders=True):
         return m.Runner(orders, "BTCUSD")
 
@@ -177,6 +180,63 @@ class MT5Tests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MultiSymbolTests(MT5Fixture):
+    """Reuses MT5Tests' fake terminal and temp state folder."""
+
+    def risk_ok_multi(self):
+        m.RISK_USD = 1000.0
+        self.addCleanup(setattr, m, "RISK_USD", 0.5)
+
+    def test_daily_loss_cap_is_shared_across_pairs(self):
+        pool = []
+        a, b = m.Runner(False, "BTCUSD", pool), m.Runner(False, "ETHUSD", pool)
+        pool.extend([a, b])
+        a.state.pnl, b.state.pnl = -0.5, -0.5                      # each below the cap alone, together at 1.00
+        self.assertEqual(b.blocked(self.acc), "daily loss cap")
+        self.assertTrue(a.limited and b.limited or b.limited)
+
+    def test_trade_cap_is_shared_across_pairs(self):
+        pool = []
+        a, b = m.Runner(False, "BTCUSD", pool), m.Runner(False, "ETHUSD", pool)
+        pool.extend([a, b])
+        a.state.trades, b.state.trades = m.MAX_TRADES - 1, 1
+        self.assertEqual(a.blocked(self.acc), "max trades")
+
+    def test_each_pair_gets_its_own_state_file(self):
+        a, b = m.Runner(False, "BTCUSD"), m.Runner(False, "ETHUSD")
+        self.assertNotEqual(a.state_file, b.state_file)
+        self.assertTrue(a.state_file.endswith("state_mt5_BTCUSD.json"))
+        self.assertTrue(os.path.dirname(a.state_file) == os.path.dirname(d.STATE_FILE))   # nothing leaks into the cwd
+
+    def test_legacy_single_state_file_still_loads(self):
+        legacy = os.path.join(os.path.dirname(d.STATE_FILE), "state_mt5.json")
+        old = d.Bot(None)
+        old.pnl, old.trades, old.open_contracts = -0.2, 1, {55: ("PUT", 158.1, 0.35)}
+        d.save_state(old, legacy)
+        r = m.Runner(False, "BTCUSD", legacy_state=True)
+        self.assertEqual(r.state.open_contracts, {55: ("PUT", 158.1, 0.35)})
+
+    def test_counters_and_status_line_explain_a_silent_bot(self):
+        m.mt5 = FakeMT5([c * 800 for c in self.fake.closes])        # BTC-sized prices: 0.01 lot risks several USD
+        self.fake = m.mt5
+        r = m.Runner(False, "BTCUSD")
+        self.assertEqual(r.step(self.acc), "skipped")               # default 0.5 USD limit
+        self.fake.bar_time += 900
+        r.step(self.acc)
+        line = r.status_line()
+        self.assertIn("signals 2", line)
+        self.assertIn("min lot above risk limit x2", line)
+        self.assertIn("opened 0", line)
+
+    def test_skip_keys(self):
+        self.assertEqual(m.skip_key("spread 0.014 is more than 25% of the 0.05 stop"), "spread too wide")
+        self.assertEqual(m.skip_key("min lot 0.01 would risk 0.73 USD"), "min lot above risk limit")
+
+    def test_heartbeat_is_a_noop_without_a_database(self):
+        r = m.Runner(False, "BTCUSD")
+        self.assertEqual(m.heartbeat([r], 123.0), 123.0)
 
 
 class OrderSwitchTests(unittest.TestCase):

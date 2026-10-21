@@ -109,3 +109,12 @@ Strategies: `sma_cross`, `rsi_revert`, `bb_revert`, `donchian`, `trend_pullback`
 the spread is charged as a share of the stop (`--spread-pct`, 0.009 = your USDJPY), both-hit-in-one-bar counts as a loss.
 Verdict: PASS needs 300+ trades and a 95% interval above zero in BOTH halves; PROMISING = positive in both halves but not
 significant yet; `random>=` shows how often random entries with the same exits beat the strategy. Tests: `python -m unittest`.
+
+## MT5: several pairs, status line, why "no trades"
+- `set MT5_SYMBOLS=USDJPY,EURUSD,GBPUSD` runs all of them in one window. The daily loss cap (`MT5_DAILY_LOSS_USD`) and the
+  daily trade cap (`MT5_MAX_TRADES`) are shared across the pairs; each pair keeps its own `state_mt5_<pair>.json`.
+- Every 15 minutes (`MT5_STATUS_S`) it prints a line such as `[status] USDJPY M5: bars 90, signals 3, opened 0, skipped: spread too wide x3`,
+  so a quiet bot is explained. Each skipped signal is also printed when it happens.
+- Common reasons for no trade: signals are rare (a 10/30 crossover fires about every 2-3 hours on M5), the spread is above
+  `MT5_MAX_SPREAD_FRAC` (0.25) of the stop, or the minimum lot risks more than `MT5_RISK_USD`.
+- The dashboard's mt5 tab now shows the real symbols (it used to show the options bot's symbol).
