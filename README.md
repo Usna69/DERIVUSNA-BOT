@@ -129,3 +129,14 @@ fails (-0.18R to -0.36R). Always run jumpy markets in both modes.
 `set MT5_STRATEGY=rsi_revert` (or `bb_revert`, `donchian`, `trend_pullback`; default `sma_cross`). The bot calls the exact functions
 the lab tested, on the closed bars of `MT5_TF`. Lab results (after spread) say `rsi_revert`/`bb_revert` lose least; none passed the gate.
 Longer candles cost less but need wider stops, so check `run.bat mt5scan` (risk at min lot) before using `MT5_TF=M15` or higher.
+
+## Lab on the dashboard
+```
+run.bat dbinit                              :: once after updating (creates the lab_runs table)
+set "DATABASE_URL=<your Neon string>"
+run.bat lab compare --publish               :: saves all 5 strategies for the pair/timeframe to the Lab page
+run.bat lab compare --symbol frxGBPUSD --tf 3600 --spread-pct 0.007 --publish --fast
+```
+`--fast` skips the random-entry baseline (much quicker). The dashboard's **Lab** page lists every published run with a verdict badge.
+On the **mt5** tab, "Live vs lab" shows the lab number for the rule and timeframe the live bot reports (`MT5_STRATEGY` and `MT5_TF`)
+next to the live average R. Restart the MT5 bot once after updating so it reports its strategy.

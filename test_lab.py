@@ -149,6 +149,27 @@ class VerdictTests(unittest.TestCase):
         self.assertEqual(p, 0.0)                                         # +5R average is impossible by luck
 
 
+class EvaluateTests(unittest.TestCase):
+    class Args:
+        symbol, tf, spread_pct, sl_atr, rr, stop_fill, session, trend, fast = "frxTEST", 300, 0.01, 1.5, 1.5, "level", (12, 17), 0, True
+
+    def test_evaluate_and_format(self):
+        trades = [(i, 1.5 if i % 3 == 0 else -1.0) for i in range(30)]
+        ev = lab.evaluate(trades, make(walk(300)), self.Args)
+        self.assertEqual(ev["n"], 30)
+        self.assertIsNone(ev["random_better"])                    # --fast skips the baseline
+        self.assertIn("n=30", lab.fmt("x", ev))
+        self.assertEqual(lab.fmt("x", lab.evaluate([])), "x                        no trades")
+
+    def test_row_for_the_database_has_every_column(self):
+        s = make(walk(300))
+        ev = lab.evaluate([(i, -1.0) for i in range(5)], s, self.Args)
+        row = lab.to_row("sma_cross", ev, s, self.Args)
+        self.assertEqual(set(row), set(__import__("db").LAB_COLS))
+        self.assertEqual(row["filters"], "session 12-17")
+        self.assertEqual(row["tf_seconds"], 300)
+
+
 class StallTests(unittest.TestCase):
     def test_trickle_of_one_candle_counts_as_a_stall(self):
         s = 0

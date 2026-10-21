@@ -22,6 +22,16 @@ create table if not exists events (
   mode text not null, level text not null, text text not null
 );
 create index if not exists events_ts_idx on events (ts desc);
+create table if not exists lab_runs (
+  id bigserial primary key,
+  ts timestamptz not null default now(),
+  symbol text not null, tf_seconds int not null, strategy text not null,
+  filters text not null default 'none', stop_fill text not null default 'level',
+  spread_pct numeric, candles int, days numeric,
+  trades int not null, win_rate numeric, mean_r numeric, ci_lo numeric, ci_hi numeric,
+  first_r numeric, second_r numeric, verdict text, random_better numeric
+);
+create unique index if not exists lab_runs_key on lab_runs (symbol, tf_seconds, strategy, filters, stop_fill);
 create table if not exists bot_status (
   mode text primary key, symbol text, day_pnl numeric, trades_today int,
   status text, message text, last_seen timestamptz not null default now()
@@ -87,6 +97,27 @@ def heartbeat(mode, symbol, day_pnl, trades_today, status, message=""):
           " on conflict (mode) do update set symbol=excluded.symbol, day_pnl=excluded.day_pnl,"
           " trades_today=excluded.trades_today, status=excluded.status, message=excluded.message, last_seen=now()",
           (mode, symbol, day_pnl, trades_today, status, message[:200]))
+
+
+LAB_COLS = ("symbol", "tf_seconds", "strategy", "filters", "stop_fill", "spread_pct", "candles", "days", "trades", "win_rate",
+            "mean_r", "ci_lo", "ci_hi", "first_r", "second_r", "verdict", "random_better")
+
+
+def lab_publish(runs):
+    """Upsert lab results (one row per symbol/timeframe/strategy/filters/stop-fill; newest wins). Raises on failure."""
+    import psycopg
+    if not DB_URL:
+        raise SystemExit("DATABASE_URL is not set in this window.")
+    cols = ", ".join(LAB_COLS)
+    marks = ", ".join(["%s"] * len(LAB_COLS))
+    update = ", ".join(f"{c}=excluded.{c}" for c in LAB_COLS[5:]) + ", ts=now()"
+    sql = (f"insert into lab_runs ({cols}) values ({marks}) "
+           f"on conflict (symbol, tf_seconds, strategy, filters, stop_fill) do update set {update}")
+    with psycopg.connect(DB_URL, connect_timeout=15, autocommit=True) as conn:
+        _ensure_schema(conn)
+        with conn.cursor() as cur:
+            cur.executemany(sql, [tuple(r[c] for c in LAB_COLS) for r in runs])
+    return len(runs)
 
 
 def init():

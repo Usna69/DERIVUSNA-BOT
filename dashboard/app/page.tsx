@@ -8,6 +8,8 @@ export const dynamic = "force-dynamic";
 type Status = { mode: string; symbol: string; day_pnl: string; trades_today: number; status: string; message: string; last_seen: Date };
 type Row = { ts: Date; mode: string; symbol: string; direction: string; stake: string; profit: string; day_pnl: string; payout_ratio: string | null };
 type Event = { ts: Date; mode: string; level: string; text: string };
+type LabRow = { symbol: string; strategy: string; tf_seconds: number; mean_r: string; trades: number; verdict: string };
+const TF_SECONDS: Record<string, number> = { M1: 60, M5: 300, M15: 900, M30: 1800, H1: 3600, H4: 14400, D1: 86400 };
 
 const MODES = ["paper", "demo", "real", "mt5"];
 const money = (x: number) => `${x >= 0 ? "+" : "-"}${Math.abs(x).toFixed(2)}`;
@@ -79,7 +81,22 @@ export default async function Home({ searchParams }: { searchParams: Promise<{ m
     const mode = MODES.includes(asked ?? "") ? asked! : [...statuses].sort((a, b) => +new Date(b.last_seen) - +new Date(a.last_seen))[0]?.mode ?? "demo";
     const rows = await sql<Row[]>`select ts, mode, symbol, direction, stake, profit, day_pnl, payout_ratio from trades where mode = ${mode} order by ts asc limit 50000`;
     const events = await sql<Event[]>`select ts, mode, level, text from events where mode = ${mode} order by ts desc limit 15`;
-    data = { statuses, mode, rows, events };
+    // MT5: what the lab expected for the rule and timeframe the live bot reports (bot_status.message = "<strategy> <TF>")
+    let lab: LabRow[] = [];
+    if (mode === "mt5") {
+      const st0 = statuses.find((x) => x.mode === "mt5");
+      const [strategy, tf] = (st0?.message ?? "").split(" ");
+      const secs = TF_SECONDS[tf ?? ""];
+      const syms = (st0?.symbol ?? "").split(",").filter(Boolean).map((x) => `frx${x}`);
+      if (strategy && secs && syms.length) {
+        try {
+          lab = await sql<LabRow[]>`select symbol, strategy, tf_seconds, mean_r, trades, verdict from lab_runs where strategy = ${strategy} and tf_seconds = ${secs} and symbol in ${sql(syms)} and filters = 'none' and stop_fill = 'level'`;
+        } catch {
+          lab = [];                                      // lab table not created yet: just skip the comparison
+        }
+      }
+    }
+    data = { statuses, mode, rows, events, lab };
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Unknown error";
     if (/relation .* does not exist/.test(msg)) {
@@ -102,7 +119,7 @@ export default async function Home({ searchParams }: { searchParams: Promise<{ m
     );
   }
 
-  const { statuses, mode, rows, events } = data;
+  const { statuses, mode, rows, events, lab } = data;
   const trades: Trade[] = rows.map((r) => ({ ts: r.ts, direction: r.direction, stake: Number(r.stake), profit: Number(r.profit), payout_ratio: r.payout_ratio == null ? null : Number(r.payout_ratio) }));
   const s = summarize(trades);
   const isMt5 = mode === "mt5";               // MT5 rows have no fixed payout: judge in R (profit / planned risk)
@@ -131,6 +148,7 @@ export default async function Home({ searchParams }: { searchParams: Promise<{ m
             {st && <span>· {st.symbol} · seen {ago(st.last_seen)}</span>}
           </div>
         </div>
+        <div className="flex items-center gap-3">
         <nav className="flex gap-1 rounded-lg border border-zinc-200 p-1 text-sm dark:border-zinc-800">
           {MODES.map((m) => (
             <Link key={m} href={`/?mode=${m}`} className={`rounded-md px-3 py-1 ${m === mode ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900" : "text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"}`}>
@@ -138,6 +156,8 @@ export default async function Home({ searchParams }: { searchParams: Promise<{ m
             </Link>
           ))}
         </nav>
+        <Link href="/lab" className="text-sm text-zinc-500 hover:underline">Lab →</Link>
+        </div>
       </header>
 
       {state === "offline" && st && (
@@ -162,6 +182,25 @@ export default async function Home({ searchParams }: { searchParams: Promise<{ m
           </>
         )}
       </section>
+
+      {rs && lab.length > 0 && (
+        <section className="rounded-xl border border-zinc-200 bg-white p-4 text-sm dark:border-zinc-800 dark:bg-zinc-900">
+          <h2 className="mb-2 text-sm font-medium">Live vs lab</h2>
+          <div className="space-y-1">
+            {lab.map((x) => (
+              <div key={x.symbol} className="flex flex-wrap justify-between gap-2">
+                <span>{x.symbol.replace("frx", "")} · {x.strategy}</span>
+                <span className="tabular-nums text-zinc-500">lab {Number(x.mean_r) >= 0 ? "+" : ""}{Number(x.mean_r).toFixed(3)}R over {x.trades} trades ({x.verdict})</span>
+              </div>
+            ))}
+            <div className="flex flex-wrap justify-between gap-2 border-t border-zinc-100 pt-1 dark:border-zinc-800">
+              <span>Live so far</span>
+              <span className="tabular-nums text-zinc-500">{rs.all.mean >= 0 ? "+" : ""}{rs.all.mean.toFixed(3)}R over {rs.all.n} trades</span>
+            </div>
+          </div>
+          <p className="mt-2 text-xs text-zinc-500">Live results far below the lab number point to slippage or costs the backtest missed. A handful of trades says little either way.</p>
+        </section>
+      )}
 
       <section className="rounded-xl border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
         <div className="mb-2 flex items-baseline justify-between">

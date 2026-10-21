@@ -467,7 +467,7 @@ def heartbeat(runners, last, every=30):
         return last
     status = "stopped" if os.path.exists(d.STOP_FILE) else "limit" if any(r.limited for r in runners) else "running"
     d.bg(db.heartbeat, "mt5", ",".join(r.symbol for r in runners), round(sum(r.state.pnl for r in runners), 2),
-         sum(r.state.trades for r in runners), status)
+         sum(r.state.trades for r in runners), status, f"{STRATEGY} {TF_NAME}")
     return time.time()
 
 

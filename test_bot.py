@@ -184,6 +184,14 @@ if __name__ == "__main__":
 
 @unittest.skipUnless(os.getenv("TEST_DATABASE_URL"), "set TEST_DATABASE_URL to a scratch Postgres to run")
 class DbTests(unittest.TestCase):
+    def setUp(self):
+        import db
+        self._saved = (db.DB_URL, db._ready)
+
+    def tearDown(self):
+        import db
+        db.DB_URL, db._ready = self._saved             # never leak a test URL into other tests
+
     def test_init_creates_tables(self):
         import db, psycopg
         db.DB_URL = os.environ["TEST_DATABASE_URL"]
@@ -213,6 +221,19 @@ class DbTests(unittest.TestCase):
             n = c.execute("select count(*) from events where mode='racetest'").fetchone()[0]
             c.execute("delete from events where mode='racetest'")
         self.assertEqual((errors, n), ([], 8))
+
+    def test_lab_publish_upserts_one_row_per_key(self):
+        import db, psycopg
+        db.DB_URL = os.environ["TEST_DATABASE_URL"]
+        row = {c: None for c in db.LAB_COLS}
+        row.update(symbol="frxTEST", tf_seconds=300, strategy="sma_cross", filters="none", stop_fill="level", trades=10, mean_r=-0.1, verdict="FAIL")
+        self.assertEqual(db.lab_publish([row]), 1)
+        row["mean_r"], row["trades"] = 0.2, 99
+        db.lab_publish([row])
+        with psycopg.connect(db.DB_URL) as c:
+            n, mean, trades = c.execute("select count(*), max(mean_r), max(trades) from lab_runs where symbol='frxTEST'").fetchone()
+            c.execute("delete from lab_runs where symbol='frxTEST'")
+        self.assertEqual((n, float(mean), trades), (1, 0.2, 99))
 
     def test_roundtrip_and_never_raises(self):
         import db, psycopg

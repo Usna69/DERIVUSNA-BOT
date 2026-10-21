@@ -234,16 +234,42 @@ def random_baseline(s, n_trades, sl_atr, rr, spread_pct, observed, trials=100, s
 
 
 # ---------------------------------------------------------------- reporting
-def line(name, trades, s=None, args=None):
+def evaluate(trades, s=None, args=None):
+    """Numbers behind one result line. `random_better` is the share of random-entry runs that did at least as well."""
     a, h1, h2 = halves(trades)
-    if not a["n"]:
+    ev = {"n": a["n"], "wins": a["wins"], "mean": a["mean"], "lo": a["lo"], "hi": a["hi"], "first": h1["mean"],
+          "second": h2["mean"], "verdict": verdict(trades), "random_better": None}
+    if a["n"] and s is not None and args is not None and not getattr(args, "fast", False):
+        ev["random_better"] = random_baseline(s, a["n"], args.sl_atr, args.rr, args.spread_pct, a["mean"], stop_fill=args.stop_fill)
+    return ev
+
+
+def fmt(name, ev):
+    if not ev["n"]:
         return f"{name:<24} no trades"
-    base = ""
-    if s is not None and args is not None:
-        p = random_baseline(s, a["n"], args.sl_atr, args.rr, args.spread_pct, a["mean"], stop_fill=args.stop_fill)
-        base = f"  random>=: {p:.0%}" if p is not None else ""
-    return (f"{name:<24} n={a['n']:<5} win {a['wins'] / a['n']:5.1%}  exp {a['mean']:+.3f}R [{a['lo']:+.3f},{a['hi']:+.3f}]  "
-            f"1st {h1['mean']:+.3f} 2nd {h2['mean']:+.3f}  {verdict(trades):<9}{base}")
+    base = f"  random>=: {ev['random_better']:.0%}" if ev["random_better"] is not None else ""
+    return (f"{name:<24} n={ev['n']:<5} win {ev['wins'] / ev['n']:5.1%}  exp {ev['mean']:+.3f}R [{ev['lo']:+.3f},{ev['hi']:+.3f}]  "
+            f"1st {ev['first']:+.3f} 2nd {ev['second']:+.3f}  {ev['verdict']:<9}{base}")
+
+
+def line(name, trades, s=None, args=None):
+    return fmt(name, evaluate(trades, s, args))
+
+
+def filters_label(args):
+    parts = []
+    if args.session:
+        parts.append(f"session {args.session[0]}-{args.session[1]}")
+    if args.trend:
+        parts.append(f"trend {args.trend}")
+    return ", ".join(parts) or "none"
+
+
+def to_row(name, ev, s, args):
+    return {"symbol": args.symbol, "tf_seconds": args.tf, "strategy": name, "filters": filters_label(args),
+            "stop_fill": args.stop_fill, "spread_pct": args.spread_pct, "candles": s.n, "days": round((s.t[-1] - s.t[0]) / 86400, 1),
+            "trades": ev["n"], "win_rate": (ev["wins"] / ev["n"]) if ev["n"] else None, "mean_r": ev["mean"], "ci_lo": ev["lo"],
+            "ci_hi": ev["hi"], "first_r": ev["first"], "second_r": ev["second"], "verdict": ev["verdict"], "random_better": ev["random_better"]}
 
 
 def build_signals(s, name, params, session, trend):
@@ -273,11 +299,17 @@ def load_series(args):
 
 def cmd_compare(args):
     s = load_series(args)
-    print(f"filters: session {args.session or 'any'}, trend {args.trend or 'none'}, stop fills: {args.stop_fill}\n")
+    print(f"filters: {filters_label(args)}, stop fills: {args.stop_fill}\n")
+    rows = []
     for name, (_, params, _) in STRATEGIES.items():
         sig = build_signals(s, name, params, args.session, args.trend)
-        print(line(name, simulate(s, sig, args.sl_atr, args.rr, args.spread_pct, stop_fill=args.stop_fill), s, args))
+        ev = evaluate(simulate(s, sig, args.sl_atr, args.rr, args.spread_pct, stop_fill=args.stop_fill), s, args)
+        print(fmt(name, ev))
+        rows.append(to_row(name, ev, s, args))
     print("\nPASS = >=300 trades and 95% interval above 0 in BOTH halves. 'random>=' = share of random-entry runs at least this good.")
+    if args.publish:
+        import db
+        print(f"published {db.lab_publish(rows)} results to the dashboard's Lab page")
 
 
 def cmd_sweep(args):
@@ -331,6 +363,8 @@ def main(argv=None):
     p.add_argument("--rr", type=float, default=1.5)
     p.add_argument("--spread-pct", type=float, default=SPREAD_PCT)
     p.add_argument("--stop-fill", choices=["level", "extreme"], default="level", help="extreme = book stop-outs at the candle's worst price (use on Boom/Crash)")
+    p.add_argument("--publish", action="store_true", help="save results to the database (needs DATABASE_URL) for the dashboard's Lab page")
+    p.add_argument("--fast", action="store_true", help="skip the random-entry baseline (much quicker)")
     p.add_argument("--session", default=None, help="UTC hours, e.g. 12-17")
     p.add_argument("--trend", type=int, default=0, help="only trade with the n-bar average, e.g. 200")
     args = p.parse_args(argv)
