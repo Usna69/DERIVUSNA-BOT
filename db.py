@@ -41,7 +41,8 @@ def _warn(e):
     global _last_warn
     if time.time() - _last_warn > 300:
         _last_warn = time.time()
-        print(f"database unavailable ({e.__class__.__name__}); continuing without it")
+        first = (str(e).strip().splitlines() or [""])[0][:160]
+        print(f"database unavailable ({e.__class__.__name__}: {first}); continuing without it")
 
 
 def _ensure_schema(conn):

@@ -1,4 +1,6 @@
 @echo off
+:: setlocal: nothing set in here (MT5_ORDERS, tokens, BOT_MODE) leaks into your CMD window afterwards
+setlocal
 :: Usage: run.bat dbinit | lab compare|sweep NAME|fetch | paper | backtest | sweep | collect | test | demo | mt5diag | mt5scan | mt5check | mt5backtest | mt5 | mt5live
 call .venv\Scripts\activate || (echo Run setup.bat first. & exit /b 1)
 if "%1"=="backtest" python backtest.py & exit /b
@@ -11,7 +13,7 @@ if "%1"=="mt5diag" python mt5_bot.py diag & exit /b
 if "%1"=="mt5scan" python mt5_bot.py scan & exit /b
 if "%1"=="mt5check" python mt5_bot.py check & exit /b
 if "%1"=="mt5backtest" python mt5_backtest.py & exit /b
-if "%1"=="mt5" python mt5_bot.py run & exit /b
+if "%1"=="mt5" python mt5_bot.py signals & exit /b
 if "%1"=="mt5live" goto mt5live
 if "%1"=="demo" goto demo
 if not "%1"=="" if not "%1"=="paper" (echo Unknown command "%1". See the Usage line at the top of run.bat. & exit /b 1)

@@ -179,6 +179,18 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class OrderSwitchTests(unittest.TestCase):
+    def test_only_run_with_flag_places_orders(self):
+        self.assertTrue(m.orders_enabled("run", {"MT5_ORDERS": "1"}))
+        self.assertFalse(m.orders_enabled("run", {}))
+        self.assertFalse(m.orders_enabled("run", {"MT5_ORDERS": "0"}))
+
+    def test_signals_and_check_never_place_orders_even_if_the_flag_leaked(self):
+        """A previous mt5live left MT5_ORDERS=1 in the CMD window; `signals` must still be harmless."""
+        for cmd in ("signals", "check", "scan"):
+            self.assertFalse(m.orders_enabled(cmd, {"MT5_ORDERS": "1", "ALLOW_REAL": "1"}), cmd)
+
+
 class PathTests(unittest.TestCase):
     def test_candidate_paths_reads_utf16_and_utf8_and_skips_missing(self):
         with tempfile.TemporaryDirectory() as tmp:

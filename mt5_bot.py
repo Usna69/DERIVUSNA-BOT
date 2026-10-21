@@ -14,7 +14,8 @@ Strategy: SMA crossover on closed bars, ATR-based stop. NOT validated: run.bat m
 """
 import math, os, sys, time
 
-os.environ.setdefault("BOT_MODE", "mt5")             # tags alerts, trades.csv rows, state file and dashboard tab
+os.environ["BOT_MODE"] = "mt5"                       # always: tags alerts, trades.csv rows, state file and dashboard tab
+
 import deriv_bot as d
 
 SYMBOL = os.getenv("MT5_SYMBOL", "auto")             # auto = best feasible from the scan
@@ -292,6 +293,12 @@ class Runner:
         return "opened"
 
 
+def orders_enabled(cmd, env=None):
+    """Orders only for `run` with MT5_ORDERS=1. `signals` and `check` never place orders, whatever the environment says."""
+    env = os.environ if env is None else env
+    return cmd == "run" and env.get("MT5_ORDERS") == "1"
+
+
 def diag():
     """Print everything that decides whether Python can attach to MT5. Places nothing, shows no secrets."""
     import platform, struct, subprocess
@@ -330,6 +337,8 @@ def main(argv):
     if len(argv) > 1 and argv[1] == "diag":
         return diag()
     cmd = argv[1] if len(argv) > 1 else "check"
+    if cmd not in ("scan", "check", "run", "signals"):
+        raise SystemExit("usage: mt5_bot.py scan | check | signals | run   (only `run` can place orders, and only with MT5_ORDERS=1)")
     acc = connect()
     real = is_real(acc)
     print(f"account {acc.login} {'REAL' if real else 'DEMO'}, balance {acc.balance:.2f} {acc.currency}, equity {acc.equity:.2f}")
@@ -350,14 +359,14 @@ def main(argv):
                              "or add smaller-notional symbols to Market Watch. Nothing was traded.")
         symbol = ranked[0]
         print(f"auto-selected {symbol} (lowest spread among symbols that fit {RISK_USD:.2f} USD risk)")
-    orders = cmd == "run" and os.getenv("MT5_ORDERS") == "1"
+    orders = orders_enabled(cmd)
     if orders and real and os.getenv("ALLOW_REAL") != "1":
         raise SystemExit("Real account: set ALLOW_REAL=1 as well as MT5_ORDERS=1.")
     r = Runner(orders, symbol)
     if cmd == "check":
         print("result:", r.step(acc, check_only=True))
         return
-    print(f"{'PLACING ORDERS' if orders else 'signals only (set MT5_ORDERS=1 to place orders)'} on {symbol} {TF_NAME}, "
+    print(f"{'PLACING REAL ORDERS' if orders and real else 'PLACING ORDERS (demo)' if orders else 'SIGNALS ONLY, no orders'} on {symbol} {TF_NAME}, "
           f"risk {RISK_USD:.2f} USD/trade, daily cap {DAILY_LOSS_USD:.2f} USD. Ctrl+C to stop.")
     d.alert(f"mt5 started on {symbol} ({'REAL' if real else 'DEMO'}, orders {'ON' if orders else 'OFF'})")
     while True:
