@@ -140,3 +140,12 @@ run.bat lab compare --symbol frxGBPUSD --tf 3600 --spread-pct 0.007 --publish --
 `--fast` skips the random-entry baseline (much quicker). The dashboard's **Lab** page lists every published run with a verdict badge.
 On the **mt5** tab, "Live vs lab" shows the lab number for the rule and timeframe the live bot reports (`MT5_STRATEGY` and `MT5_TF`)
 next to the live average R. Restart the MT5 bot once after updating so it reports its strategy.
+
+## MT5: percentage limits, session filter, open positions
+- **Percent limits:** `MT5_RISK_PCT`, `MT5_DAILY_LOSS_PCT`, `MT5_EQUITY_FLOOR_PCT` (e.g. `1.4`, `3`, `70`) are taken from the balance measured at the first
+  step of each day and saved with the state, so a top-up or a loss moves the limits by itself. They override `MT5_RISK_USD`,
+  `MT5_DAILY_LOSS_USD` and `MT5_EQUITY_FLOOR`, which still work when no percentage is set. The start banner prints the dollar values in force.
+- **Session filter:** `set MT5_SESSION=12-17` opens trades only in those UTC hours (`22-6` wraps midnight). It uses the real UTC clock, not MT5's
+  server time. Signals outside the window are counted as `outside session` in the status line. `run.bat mt5check` ignores it.
+- **Open positions:** the bot syncs its open positions to the database every 30 s; the mt5 tab shows pair, side, lots, entry, stop, target and floating P&L.
+  Run `run.bat dbinit` once after updating so the `positions` table exists (the dashboard just shows nothing until then).

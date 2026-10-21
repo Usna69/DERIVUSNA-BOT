@@ -12,7 +12,7 @@ Rules, enforced in code:
   - STOP file halts new orders; 3 failed orders in a row halts the bot
 Strategy: SMA crossover on closed bars, ATR-based stop. NOT validated: run.bat mt5backtest first and read the p-value.
 """
-import math, os, sys, time
+import datetime, math, os, sys, time
 
 os.environ["BOT_MODE"] = "mt5"                       # always: tags alerts, trades.csv rows, state file and dashboard tab
 
@@ -29,6 +29,10 @@ RR = float(os.getenv("MT5_RR", "1.5"))               # take-profit = RR x stop d
 RISK_USD = float(os.getenv("MT5_RISK_USD", "0.5"))   # max loss per trade if the stop is hit
 DAILY_LOSS_USD = float(os.getenv("MT5_DAILY_LOSS_USD", "1.0"))
 EQUITY_FLOOR = float(os.getenv("MT5_EQUITY_FLOOR", "5.0"))   # below this equity: stop for good
+RISK_PCT = float(os.getenv("MT5_RISK_PCT", "0"))                 # percent of the day's starting balance; overrides the USD value
+DAILY_LOSS_PCT = float(os.getenv("MT5_DAILY_LOSS_PCT", "0"))
+EQUITY_FLOOR_PCT = float(os.getenv("MT5_EQUITY_FLOOR_PCT", "0"))
+SESSION_TXT = os.getenv("MT5_SESSION", "").strip()                # e.g. "12-17": only open trades in these UTC hours
 MAX_TRADES = int(os.getenv("MT5_MAX_TRADES", "6"))
 MAX_SPREAD_FRAC = float(os.getenv("MT5_MAX_SPREAD_FRAC", "0.25"))   # spread must be <= this share of the stop distance
 ALLOW_SYNTHETIC = os.getenv("MT5_ALLOW_SYNTHETIC") == "1"   # Boom/Crash/Volatility/Step: random by design, no edge possible
@@ -184,6 +188,7 @@ def symbol_view(symbol):
 def scan(print_rows=True):
     """Rank every crypto symbol in Market Watch. Returns feasible symbols best-first."""
     out = []
+    risk_limit = effective_limits(getattr(mt5.account_info(), "balance", None))["risk"]
     for s in mt5.symbols_get() or []:
         if not (s.visible and s.trade_mode == 4) or (is_synthetic(s) and not ALLOW_SYNTHETIC):
             continue
@@ -196,14 +201,53 @@ def scan(print_rows=True):
         per_lot = abs(mt5.order_calc_profit(0, s.name, 1.0, tick.ask, tick.ask - dist) or dist * si.trade_contract_size)
         out.append({"symbol": s.name, "spread_pct": (tick.ask - tick.bid) / mid * 100, "min_lot": si.volume_min,
                     "risk_at_min": si.volume_min * per_lot, "spread_vs_stop": (tick.ask - tick.bid) / dist})
-    ok = sorted([x for x in out if x["risk_at_min"] <= RISK_USD and x["spread_vs_stop"] <= MAX_SPREAD_FRAC],
+    ok = sorted([x for x in out if x["risk_at_min"] <= risk_limit and x["spread_vs_stop"] <= MAX_SPREAD_FRAC],
                 key=lambda x: x["spread_pct"])
     if print_rows:
-        print(f"{'symbol':10} {'spread%':>8} {'min lot':>8} {'risk@min lot':>13} {'spread/stop':>12}  (limit {RISK_USD:.2f} USD, {TF_NAME} bars)")
+        print(f"{'symbol':10} {'spread%':>8} {'min lot':>8} {'risk@min lot':>13} {'spread/stop':>12}  (limit {risk_limit:.2f} USD, {TF_NAME} bars)")
         for x in sorted(out, key=lambda x: (x not in ok, x["spread_pct"])):
             print(f"{x['symbol']:10} {x['spread_pct']:8.3f} {x['min_lot']:8g} {x['risk_at_min']:13.2f} {x['spread_vs_stop']:12.2f}  "
-                  f"{'OK' if x in ok else 'too big for your risk limit' if x['risk_at_min'] > RISK_USD else 'spread too wide'}")
+                  f"{'OK' if x in ok else 'too big for your risk limit' if x['risk_at_min'] > risk_limit else 'spread too wide'}")
     return [x["symbol"] for x in ok]
+
+
+def effective_limits(balance=None):
+    """Dollar limits in force. A *_PCT setting wins over its USD twin and is taken from the day's starting balance."""
+    def pick(pct, usd):
+        return balance * pct / 100.0 if pct > 0 and balance else usd
+    return {"risk": pick(RISK_PCT, RISK_USD), "daily": pick(DAILY_LOSS_PCT, DAILY_LOSS_USD),
+            "floor": pick(EQUITY_FLOOR_PCT, EQUITY_FLOOR), "pct": bool(balance) and any((RISK_PCT, DAILY_LOSS_PCT, EQUITY_FLOOR_PCT))}
+
+
+def parse_session(txt):
+    """'12-17' -> (12, 17); '' -> None. A window like '22-6' wraps past midnight."""
+    if not txt:
+        return None
+    try:
+        a, b = txt.split("-")
+        a, b = int(a), int(b)
+    except ValueError:
+        raise SystemExit(f"MT5_SESSION must look like 12-17 (UTC hours), got {txt!r}")
+    if not (0 <= a <= 24 and 0 <= b <= 24) or a == b:
+        raise SystemExit(f"MT5_SESSION hours must be 0-24 and different, got {txt!r}")
+    return a, b
+
+
+SESSION = parse_session(SESSION_TXT)
+
+
+def utc_now():
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
+def in_session(now=None, session=None):
+    """True when no session is set, or the current UTC hour is inside it. Uses the real clock, not MT5's server time."""
+    session = SESSION if session is None else session
+    if not session:
+        return True
+    hour = (now or utc_now()).hour
+    a, b = session
+    return a <= hour < b if a < b else (hour >= a or hour < b)
 
 
 def skip_key(reason):
@@ -239,6 +283,9 @@ class Runner:
     def save(self):
         d.save_state(self.state, self.state_file)
 
+    def limits(self):
+        return effective_limits(getattr(self.state, "day_balance", None))
+
     def open_pnl(self):
         return sum(p.profit for p in self.positions())
 
@@ -263,6 +310,7 @@ class Runner:
         today = time.strftime("%Y-%m-%d")
         if self.state.day != today:
             self.state.day, self.state.pnl, self.state.trades, self.state.limit_alerted = today, 0.0, 0, False
+            self.state.day_balance = None             # re-measured at the first step of the new day
             self.warned.clear()
             self.save()
 
@@ -287,12 +335,13 @@ class Runner:
             return "halted"
         if os.path.exists(d.STOP_FILE):
             return "STOP file present"
-        if acc.equity < EQUITY_FLOOR:
+        lim = self.limits()
+        if acc.equity < lim["floor"]:
             self.halted = True
-            d.alert(f"equity {acc.equity:.2f} below floor {EQUITY_FLOOR:.2f}: bot halted for good. Delete state and restart to resume.")
+            d.alert(f"equity {acc.equity:.2f} below floor {lim['floor']:.2f}: bot halted for good. Delete state and restart to resume.")
             return "equity floor"
         total = self.day_total()
-        if total <= -DAILY_LOSS_USD:
+        if total <= -lim["daily"]:
             self.limited = True
             self.warn_once("daily", f"daily loss cap hit ({total:+.2f} USD across {len(self.pool)} pair(s)): no new trades today.")
             return "daily loss cap"
@@ -307,6 +356,9 @@ class Runner:
 
     def step(self, acc, check_only=False):
         self.day_reset()
+        if getattr(self.state, "day_balance", None) is None and getattr(acc, "balance", None):
+            self.state.day_balance = float(acc.balance)   # percentage limits are measured from this
+            self.save()
         self.settle_closed()
         why = self.blocked(acc)
         if why and not check_only:
@@ -325,8 +377,11 @@ class Runner:
             return "no signal"
         if direction:
             self.counts["signals"] += 1
+            if not check_only and not in_session():
+                self.counts["skipped"]["outside session"] = self.counts["skipped"].get("outside session", 0) + 1
+                return "outside session"
         direction = direction or "CALL"             # check mode: validate an order even without a signal
-        plan, reason = plan_order(si, tick, direction, a, RISK_USD, mt5.order_calc_profit)
+        plan, reason = plan_order(si, tick, direction, a, self.limits()["risk"], mt5.order_calc_profit)
         if not plan:
             key = skip_key(reason)
             self.counts["skipped"][key] = self.counts["skipped"].get(key, 0) + 1
@@ -441,8 +496,13 @@ def main(argv):
         for r in runners:
             print(f"{r.symbol} result:", r.step(acc, check_only=True))
         return
+    lim = effective_limits(float(acc.balance))
+    limits_txt = (f"risk {lim['risk']:.2f} USD/trade, daily cap {lim['daily']:.2f} USD, equity floor {lim['floor']:.2f} USD"
+                  + (f" (percent of {acc.balance:.2f} USD)" if lim["pct"] else ""))
+    if SESSION:
+        limits_txt += f", session {SESSION[0]:02d}:00-{SESSION[1]:02d}:00 UTC only"
     label = "PLACING REAL ORDERS" if orders and real else "PLACING ORDERS (demo)" if orders else "SIGNALS ONLY, no orders"
-    print(f"{label} on {', '.join(names)} {TF_NAME}, strategy {STRATEGY}, risk {RISK_USD:.2f} USD/trade, daily cap {DAILY_LOSS_USD:.2f} USD, "
+    print(f"{label} on {', '.join(names)} {TF_NAME}, strategy {STRATEGY}, {limits_txt}, "
           f"max {MAX_TRADES} trades/day (shared). Status line every {STATUS_S // 60} min. Ctrl+C to stop.")
     d.alert(f"mt5 started on {', '.join(names)} ({'REAL' if real else 'DEMO'}, orders {'ON' if orders else 'OFF'})")
     last_status, last_hb = time.time(), 0.0
@@ -461,6 +521,19 @@ def main(argv):
         time.sleep(POLL_S)
 
 
+def position_rows(runners):
+    """Open positions of this bot, shaped for the dashboard's positions table."""
+    rows = []
+    for r in runners:
+        for p in r.positions():
+            t = getattr(p, "time", None)
+            rows.append({"ticket": p.ticket, "symbol": r.symbol, "direction": "CALL" if getattr(p, "type", 0) == 0 else "PUT",
+                         "volume": getattr(p, "volume", None), "price_open": getattr(p, "price_open", None),
+                         "sl": getattr(p, "sl", None), "tp": getattr(p, "tp", None), "profit": getattr(p, "profit", None),
+                         "opened_at": datetime.datetime.fromtimestamp(t, tz=datetime.timezone.utc) if t else None})
+    return rows
+
+
 def heartbeat(runners, last, every=30):
     """One dashboard row for the whole MT5 bot (symbols joined, P&L and trades summed). Returns the new 'last' time."""
     if not db.enabled() or time.time() - last < every:
@@ -468,6 +541,10 @@ def heartbeat(runners, last, every=30):
     status = "stopped" if os.path.exists(d.STOP_FILE) else "limit" if any(r.limited for r in runners) else "running"
     d.bg(db.heartbeat, "mt5", ",".join(r.symbol for r in runners), round(sum(r.state.pnl for r in runners), 2),
          sum(r.state.trades for r in runners), status, f"{STRATEGY} {TF_NAME}")
+    try:
+        d.bg(db.positions_sync, "mt5", position_rows(runners))
+    except Exception as e:                           # noqa: BLE001 - dashboard data must never disturb trading
+        print("positions sync skipped:", e.__class__.__name__)
     return time.time()
 
 

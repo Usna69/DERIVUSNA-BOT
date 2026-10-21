@@ -32,6 +32,12 @@ create table if not exists lab_runs (
   first_r numeric, second_r numeric, verdict text, random_better numeric
 );
 create unique index if not exists lab_runs_key on lab_runs (symbol, tf_seconds, strategy, filters, stop_fill);
+create table if not exists positions (
+  mode text not null, ticket bigint not null, symbol text not null, direction text not null,
+  volume numeric, price_open numeric, sl numeric, tp numeric, profit numeric,
+  opened_at timestamptz, updated_at timestamptz not null default now(),
+  primary key (mode, ticket)
+);
 create table if not exists bot_status (
   mode text primary key, symbol text, day_pnl numeric, trades_today int,
   status text, message text, last_seen timestamptz not null default now()
@@ -97,6 +103,25 @@ def heartbeat(mode, symbol, day_pnl, trades_today, status, message=""):
           " on conflict (mode) do update set symbol=excluded.symbol, day_pnl=excluded.day_pnl,"
           " trades_today=excluded.trades_today, status=excluded.status, message=excluded.message, last_seen=now()",
           (mode, symbol, day_pnl, trades_today, status, message[:200]))
+
+
+def positions_sync(mode, rows):
+    """Replace this bot's open-position rows with `rows` (list of dicts). Best effort, never raises."""
+    if not DB_URL:
+        return
+    try:
+        import psycopg
+        with psycopg.connect(DB_URL, connect_timeout=10, autocommit=True) as conn:
+            _ensure_schema(conn)
+            with conn.transaction():
+                conn.execute("delete from positions where mode=%s", (mode,))
+                for r in rows:
+                    conn.execute("insert into positions (mode, ticket, symbol, direction, volume, price_open, sl, tp, profit, opened_at)"
+                                 " values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                                 (mode, r["ticket"], r["symbol"], r["direction"], r["volume"], r["price_open"], r["sl"], r["tp"],
+                                  r["profit"], r.get("opened_at")))
+    except Exception as e:                           # noqa: BLE001 - must never raise into the bot
+        _warn(e)
 
 
 LAB_COLS = ("symbol", "tf_seconds", "strategy", "filters", "stop_fill", "spread_pct", "candles", "days", "trades", "win_rate",

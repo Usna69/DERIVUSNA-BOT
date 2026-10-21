@@ -101,6 +101,7 @@ class ApiError(RuntimeError):
 def save_state(bot, path=None):
     """Atomic write so a crash mid-save cannot corrupt the file."""
     data = {"pnl": bot.pnl, "trades": bot.trades, "last_trade": bot.last_trade, "day": bot.day,
+            "day_balance": getattr(bot, "day_balance", None),
             "open_contracts": {str(k): list(v) for k, v in bot.open_contracts.items()}}
     try:
         path = path or STATE_FILE
@@ -120,7 +121,7 @@ def load_state(path=None):
         return {}
     state = {"open_contracts": {int(k): tuple(v) for k, v in d.get("open_contracts", {}).items()}}
     if d.get("day") == time.strftime("%Y-%m-%d"):
-        state.update({k: d[k] for k in ("pnl", "trades", "last_trade", "day") if k in d})
+        state.update({k: d[k] for k in ("pnl", "trades", "last_trade", "day", "day_balance") if k in d})
     return state
 
 

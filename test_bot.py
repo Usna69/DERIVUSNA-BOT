@@ -235,6 +235,17 @@ class DbTests(unittest.TestCase):
             c.execute("delete from lab_runs where symbol='frxTEST'")
         self.assertEqual((n, float(mean), trades), (1, 0.2, 99))
 
+    def test_positions_sync_replaces_the_bots_rows(self):
+        import db, psycopg
+        db.DB_URL = os.environ["TEST_DATABASE_URL"]
+        base = dict(symbol="USDJPY", direction="CALL", volume=0.01, price_open=158.0, sl=157.9, tp=158.1, profit=-0.1, opened_at=None)
+        db.positions_sync("postest", [dict(base, ticket=1), dict(base, ticket=2)])
+        db.positions_sync("postest", [dict(base, ticket=2, profit=0.3)])         # position 1 closed
+        with psycopg.connect(db.DB_URL) as c:
+            rows = c.execute("select ticket, profit from positions where mode='postest'").fetchall()
+            c.execute("delete from positions where mode='postest'")
+        self.assertEqual([(t, float(p)) for t, p in rows], [(2, 0.3)])
+
     def test_roundtrip_and_never_raises(self):
         import db, psycopg
         db.DB_URL, db._ready = os.environ["TEST_DATABASE_URL"], False

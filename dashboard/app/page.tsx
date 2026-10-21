@@ -8,6 +8,7 @@ export const dynamic = "force-dynamic";
 type Status = { mode: string; symbol: string; day_pnl: string; trades_today: number; status: string; message: string; last_seen: Date };
 type Row = { ts: Date; mode: string; symbol: string; direction: string; stake: string; profit: string; day_pnl: string; payout_ratio: string | null };
 type Event = { ts: Date; mode: string; level: string; text: string };
+type Position = { symbol: string; direction: string; volume: string; price_open: string; sl: string | null; tp: string | null; profit: string | null; opened_at: Date | null; updated_at: Date };
 type LabRow = { symbol: string; strategy: string; tf_seconds: number; mean_r: string; trades: number; verdict: string };
 const TF_SECONDS: Record<string, number> = { M1: 60, M5: 300, M15: 900, M30: 1800, H1: 3600, H4: 14400, D1: 86400 };
 
@@ -96,7 +97,13 @@ export default async function Home({ searchParams }: { searchParams: Promise<{ m
         }
       }
     }
-    data = { statuses, mode, rows, events, lab };
+    let positions: Position[] = [];
+    try {
+      positions = await sql<Position[]>`select symbol, direction, volume, price_open, sl, tp, profit, opened_at, updated_at from positions where mode = ${mode} order by opened_at nulls last`;
+    } catch {
+      positions = [];                                    // positions table not created yet (older database): show nothing
+    }
+    data = { statuses, mode, rows, events, lab, positions };
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Unknown error";
     if (/relation .* does not exist/.test(msg)) {
@@ -119,7 +126,7 @@ export default async function Home({ searchParams }: { searchParams: Promise<{ m
     );
   }
 
-  const { statuses, mode, rows, events, lab } = data;
+  const { statuses, mode, rows, events, lab, positions } = data;
   const trades: Trade[] = rows.map((r) => ({ ts: r.ts, direction: r.direction, stake: Number(r.stake), profit: Number(r.profit), payout_ratio: r.payout_ratio == null ? null : Number(r.payout_ratio) }));
   const s = summarize(trades);
   const isMt5 = mode === "mt5";               // MT5 rows have no fixed payout: judge in R (profit / planned risk)
@@ -182,6 +189,42 @@ export default async function Home({ searchParams }: { searchParams: Promise<{ m
           </>
         )}
       </section>
+
+      {isMt5 && (
+        <section className="rounded-xl border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
+          <div className="flex items-baseline justify-between border-b border-zinc-200 px-4 py-2 dark:border-zinc-800">
+            <h2 className="text-sm font-medium">Open positions</h2>
+            <span className="text-xs text-zinc-500">
+              {positions.length === 0 ? "none open" : `${positions.length} open · floating ${money(positions.reduce((a, x) => a + Number(x.profit ?? 0), 0))} · updated ${ago(positions[0].updated_at)}${state === "offline" ? " (bot offline: last known)" : ""}`}
+            </span>
+          </div>
+          {positions.length > 0 && (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm tabular-nums">
+                <thead className="text-left text-xs text-zinc-500">
+                  <tr><th className="px-4 py-2">Pair</th><th>Side</th><th className="text-right">Lots</th><th className="text-right">Entry</th><th className="text-right">Stop</th><th className="text-right">Target</th><th className="px-4 text-right">Floating</th></tr>
+                </thead>
+                <tbody>
+                  {positions.map((x, i) => {
+                    const pr = Number(x.profit ?? 0);
+                    return (
+                      <tr key={i} className="border-t border-zinc-100 dark:border-zinc-800">
+                        <td className="px-4 py-1.5 font-medium">{x.symbol}</td>
+                        <td>{x.direction}</td>
+                        <td className="text-right">{Number(x.volume)}</td>
+                        <td className="text-right">{Number(x.price_open)}</td>
+                        <td className="text-right text-zinc-500">{x.sl ? Number(x.sl) : "none"}</td>
+                        <td className="text-right text-zinc-500">{x.tp ? Number(x.tp) : "none"}</td>
+                        <td className={`px-4 text-right ${pr >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`}>{money(pr)}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+      )}
 
       {rs && lab.length > 0 && (
         <section className="rounded-xl border border-zinc-200 bg-white p-4 text-sm dark:border-zinc-800 dark:bg-zinc-900">

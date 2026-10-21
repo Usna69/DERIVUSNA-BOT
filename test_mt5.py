@@ -1,5 +1,5 @@
 """Offline tests for mt5_bot.py using a fake MetaTrader5 module (no terminal, no account)."""
-import os, tempfile, unittest
+import datetime, os, tempfile, unittest
 from types import SimpleNamespace as NS
 import deriv_bot as d
 import mt5_bot as m
@@ -284,6 +284,113 @@ class StrategySwitchTests(MT5Fixture):
             m.STRATEGY = name
             v = m.symbol_view("BTCUSD")
             self.assertIn(m.strategy_signal(v[3], v[4]), ("CALL", "PUT", None), name)
+
+
+class PercentLimitTests(MT5Fixture):
+    def pct(self, risk=0.0, daily=0.0, floor=0.0):
+        old = (m.RISK_PCT, m.DAILY_LOSS_PCT, m.EQUITY_FLOOR_PCT)
+        m.RISK_PCT, m.DAILY_LOSS_PCT, m.EQUITY_FLOOR_PCT = risk, daily, floor
+        self.addCleanup(lambda: (setattr(m, "RISK_PCT", old[0]), setattr(m, "DAILY_LOSS_PCT", old[1]), setattr(m, "EQUITY_FLOOR_PCT", old[2])))
+
+    def test_percentages_follow_the_balance(self):
+        self.pct(1.4, 3.0, 70.0)
+        lim = m.effective_limits(35.0)
+        self.assertAlmostEqual(lim["risk"], 0.49)
+        self.assertAlmostEqual(lim["daily"], 1.05)
+        self.assertAlmostEqual(lim["floor"], 24.5)
+        self.assertTrue(lim["pct"])
+        self.assertAlmostEqual(m.effective_limits(100.0)["risk"], 1.4)           # a top-up scales the limits by itself
+
+    def test_usd_values_are_used_when_no_percentage_is_set(self):
+        self.pct()
+        lim = m.effective_limits(35.0)
+        self.assertEqual((lim["risk"], lim["daily"], lim["floor"], lim["pct"]), (m.RISK_USD, m.DAILY_LOSS_USD, m.EQUITY_FLOOR, False))
+        self.assertEqual(m.effective_limits(None)["risk"], m.RISK_USD)          # unknown balance never means "no limit"
+
+    def test_day_balance_is_captured_once_saved_and_restored(self):
+        self.pct(2.0)
+        r = m.Runner(False, "BTCUSD")
+        r.step(NS(equity=35.0, balance=35.0))
+        self.assertEqual(r.state.day_balance, 35.0)
+        r.step(NS(equity=30.0, balance=30.0))                                   # later in the day: base does not move
+        self.assertEqual(r.state.day_balance, 35.0)
+        self.assertAlmostEqual(r.limits()["risk"], 0.70)
+        again = m.Runner(False, "BTCUSD")                                       # restart the same day
+        self.assertEqual(again.state.day_balance, 35.0)
+
+    def test_new_day_remeasures_the_base(self):
+        r = m.Runner(False, "BTCUSD")
+        r.state.day, r.state.day_balance = "2000-01-01", 10.0
+        r.step(NS(equity=35.0, balance=35.0))
+        self.assertEqual(r.state.day_balance, 35.0)
+
+    def test_percent_floor_and_daily_cap_block(self):
+        self.pct(0.0, 3.0, 70.0)
+        r = m.Runner(False, "BTCUSD")
+        r.state.day_balance = 35.0
+        r.state.pnl = -1.2                                                       # beyond 3% of 35 = 1.05
+        self.assertEqual(r.blocked(NS(equity=33.0, balance=33.0)), "daily loss cap")
+        r2 = m.Runner(False, "ETHUSD")
+        r2.state.day_balance = 35.0
+        self.assertEqual(r2.blocked(NS(equity=20.0, balance=20.0)), "equity floor")   # below 70% of 35 = 24.5
+
+    def test_scan_uses_the_percentage_risk(self):
+        self.pct(risk=100.0)                                                     # absurdly high on purpose: everything fits
+        m.mt5 = FakeMT5([c * 800 for c in self.fake.closes])
+        self.assertEqual(m.scan(print_rows=False), ["BTCUSD"])
+
+
+class SessionTests(MT5Fixture):
+    def at(self, h, mnt=0):
+        return datetime.datetime(2026, 10, 21, h, mnt, tzinfo=datetime.timezone.utc)
+
+    def test_window_boundaries(self):
+        w = (12, 17)
+        self.assertFalse(m.in_session(self.at(11, 59), w))
+        self.assertTrue(m.in_session(self.at(12, 0), w))
+        self.assertTrue(m.in_session(self.at(16, 59), w))
+        self.assertFalse(m.in_session(self.at(17, 0), w))
+
+    def test_wraps_past_midnight_and_empty_means_always(self):
+        self.assertTrue(m.in_session(self.at(23), (22, 6)))
+        self.assertTrue(m.in_session(self.at(3), (22, 6)))
+        self.assertFalse(m.in_session(self.at(12), (22, 6)))
+        self.assertTrue(m.in_session(self.at(3), None) if m.SESSION is None else True)
+
+    def test_parse_and_reject_bad_values(self):
+        self.assertEqual(m.parse_session("12-17"), (12, 17))
+        self.assertIsNone(m.parse_session(""))
+        for bad in ("noon", "12", "12-12", "25-3"):
+            with self.assertRaises(SystemExit):
+                m.parse_session(bad)
+
+    def test_signal_outside_the_session_is_counted_and_not_traded(self):
+        m.RISK_USD = 1000.0
+        old = (m.SESSION, m.utc_now)
+        m.SESSION, m.utc_now = (12, 17), lambda: self.at(3)
+        self.addCleanup(lambda: (setattr(m, "SESSION", old[0]), setattr(m, "utc_now", old[1]), setattr(m, "RISK_USD", 0.5)))
+        r = m.Runner(True, "BTCUSD")
+        self.assertEqual(r.step(self.acc), "outside session")
+        self.assertEqual(r.counts["skipped"], {"outside session": 1})
+        self.assertEqual(self.fake.sent, [])                                     # orders are on, but nothing was sent
+        m.utc_now = lambda: self.at(13)
+        self.fake.bar_time += 900
+        self.assertEqual(r.step(self.acc), "opened")                             # same signal inside the window trades
+
+
+class PositionRowTests(MT5Fixture):
+    def test_rows_for_the_dashboard(self):
+        self.fake.positions = [
+            NS(ticket=1, magic=m.MAGIC, type=1, volume=0.01, price_open=158.1, sl=158.2, tp=158.0, profit=-0.1, time=1792580000),
+            NS(ticket=2, magic=999, type=0, volume=1.0, price_open=1.0, sl=0, tp=0, profit=0.0, time=1792580000),   # someone else's
+        ]
+        rows = m.position_rows([m.Runner(False, "BTCUSD")])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual((rows[0]["ticket"], rows[0]["direction"], rows[0]["sl"], rows[0]["tp"]), (1, "PUT", 158.2, 158.0))
+        self.assertIsNotNone(rows[0]["opened_at"].tzinfo)
+
+    def test_no_positions_gives_an_empty_list(self):
+        self.assertEqual(m.position_rows([m.Runner(False, "BTCUSD")]), [])
 
 
 class OrderSwitchTests(unittest.TestCase):
